@@ -574,7 +574,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--db", type=str, default="~/.openjarvis/dogfood_v1.db",
-        help="path to dogfood KnowledgeStore (will be deleted and recreated)",
+        help=(
+            "path to KnowledgeStore. Existing rows are preserved by default; "
+            "pipeline dedup (by doc_id) skips messages already ingested. Pass "
+            "--clobber to wipe and rebuild from scratch."
+        ),
+    )
+    parser.add_argument(
+        "--clobber", action="store_true",
+        help="Delete the target db (and its WAL sidecars) before ingest.",
     )
     parser.add_argument(
         "--out", type=str, default="dogfood_report.md",
@@ -596,11 +604,21 @@ def main() -> int:
 
     db_path = Path(args.db).expanduser()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
-        db_path.unlink()
-    for sidecar in (db_path.with_suffix(db_path.suffix + "-wal"), db_path.with_suffix(db_path.suffix + "-shm")):
-        if sidecar.exists():
-            sidecar.unlink()
+    if args.clobber:
+        if db_path.exists():
+            db_path.unlink()
+        for sidecar in (
+            db_path.with_suffix(db_path.suffix + "-wal"),
+            db_path.with_suffix(db_path.suffix + "-shm"),
+        ):
+            if sidecar.exists():
+                sidecar.unlink()
+    elif db_path.exists():
+        print(
+            f"Reusing existing KnowledgeStore at {db_path} — pipeline dedup "
+            f"will skip already-ingested doc_ids. Pass --clobber to wipe.",
+            file=sys.stderr,
+        )
 
     connector = GmailConnector(credentials_path=args.credentials)
     if not connector.is_connected():
