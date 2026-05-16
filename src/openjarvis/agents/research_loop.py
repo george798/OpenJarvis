@@ -228,11 +228,24 @@ def _hit_url(source: str, document_id: str) -> str:
     Gmail is the only source we currently link out for; everything else
     returns an empty string and the client falls back to non-clickable
     citation chips.
+
+    Two id flavors land here:
+
+    - **Hex message id** (``19dfa2ccbeff78b0``) — what the OAuth Gmail
+      connector stores. Resolves directly via ``#all/<id>`` permalink.
+    - **RFC822 Message-ID** (``<CABCD@mail.gmail.com>``) — what the IMAP
+      connector stores, since IMAP doesn't expose Gmail's internal hex
+      id. The permalink form would 404; instead route through Gmail's
+      search URL with the ``rfc822msgid:`` operator, which lands the user
+      on the specific message.
     """
     if source == "gmail" and document_id:
         msg_id = _bare_doc_id(source, document_id)
         if not msg_id:
             return ""
+        if "@" in msg_id or "<" in msg_id or ">" in msg_id:
+            rfc_id = msg_id.strip("<>")
+            return f"https://mail.google.com/mail/u/0/#search/rfc822msgid:{rfc_id}"
         return f"https://mail.google.com/mail/u/0/#all/{msg_id}"
     return ""
 
