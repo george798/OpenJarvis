@@ -383,24 +383,39 @@ def test_deleted_at_filters_retrieve(ks: KnowledgeStore) -> None:
 
 
 def test_unique_natural_key_constraint(ks: KnowledgeStore) -> None:
-    """Same (source, source_id, chunk_index) cannot be inserted twice."""
-    import sqlite3
+    """Duplicate (source, source_id, chunk_index) is silently skipped.
 
-    _store(
+    The store uses ``INSERT OR IGNORE`` so re-running a sync or replaying a
+    dogfood script over an already-populated store no longer crashes; the
+    original row stays put and the duplicate is dropped.
+    """
+    first_id = _store(
         ks,
         content="First copy",
         source="gmail",
         source_id="msg-unique-1",
         chunk_index=0,
     )
-    with pytest.raises(sqlite3.IntegrityError):
-        _store(
-            ks,
-            content="Duplicate copy",
-            source="gmail",
-            source_id="msg-unique-1",
-            chunk_index=0,
-        )
+    second_id = _store(
+        ks,
+        content="Duplicate copy",
+        source="gmail",
+        source_id="msg-unique-1",
+        chunk_index=0,
+    )
+    # Same identity — the natural key collision returned the existing row's id.
+    assert second_id == first_id
+    # Content of the original row is preserved.
+    row = ks._conn.execute(
+        "SELECT content FROM knowledge_chunks WHERE id = ?", (first_id,)
+    ).fetchone()
+    assert row["content"] == "First copy"
+    # Only one row exists for this natural key.
+    count = ks._conn.execute(
+        "SELECT COUNT(*) FROM knowledge_chunks "
+        "WHERE source = 'gmail' AND source_id = 'msg-unique-1' AND chunk_index = 0"
+    ).fetchone()[0]
+    assert count == 1
 
 
 def test_unique_constraint_skipped_when_source_id_empty(ks: KnowledgeStore) -> None:

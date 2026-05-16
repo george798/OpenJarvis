@@ -265,9 +265,9 @@ class KnowledgeStore(MemoryBackend):
 
         meta_json = json.dumps(combined_meta)
 
-        self._conn.execute(
+        cur = self._conn.execute(
             """
-            INSERT INTO knowledge_chunks
+            INSERT OR IGNORE INTO knowledge_chunks
                 (id, doc_id, content, source, source_id, doc_type, title, author,
                  participants, participants_raw, timestamp, thread_id, channel,
                  url, metadata, chunk_index, embedding, embedding_model_version,
@@ -299,6 +299,22 @@ class KnowledgeStore(MemoryBackend):
             ),
         )
         self._conn.commit()
+
+        # If the natural-key (source, source_id, chunk_index) already existed
+        # SQLite skipped the insert. Re-runs of the dogfood script or a
+        # SyncEngine that re-emits a known document hit this path; return
+        # the existing chunk id so callers don't see two different identities
+        # for the same row, and suppress the MEMORY_STORE event (nothing new
+        # was actually written).
+        if cur.rowcount == 0:
+            existing = self._conn.execute(
+                "SELECT id FROM knowledge_chunks "
+                "WHERE source=? AND source_id=? AND chunk_index=?",
+                (source, source_id, chunk_index),
+            ).fetchone()
+            if existing is not None:
+                return existing["id"]
+            return chunk_id
 
         get_event_bus().publish(
             EventType.MEMORY_STORE,
