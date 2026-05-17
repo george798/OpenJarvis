@@ -392,14 +392,6 @@ function GmailOAuthAdvanced({
 // ---------------------------------------------------------------------------
 
 // Sync status display component with progress bar
-function formatEta(seconds: number): string | null {
-  if (!Number.isFinite(seconds) || seconds <= 0) return null;
-  if (seconds < 60) return `~${Math.round(seconds)} sec remaining`;
-  if (seconds < 3600) return `~${Math.round(seconds / 60)} min remaining`;
-  if (seconds < 86400) return `~${Math.round(seconds / 3600)} hr remaining`;
-  return 'more than a day remaining';
-}
-
 function formatTimeAgo(iso: string | null | undefined): string | null {
   if (!iso) return null;
   const t = new Date(iso).getTime();
@@ -419,6 +411,21 @@ function formatTimeAgo(iso: string | null | undefined): string | null {
   return `${d} day${d === 1 ? '' : 's'} ago`;
 }
 
+/** Render how far back the corpus extends, given the oldest indexed
+ *  item's timestamp. Returns null when there isn't enough data yet. */
+function formatBacklogRange(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  const days = (Date.now() - t) / 86400_000;
+  if (days < 7) return 'past few days';
+  if (days < 30) return 'past month';
+  if (days < 90) return 'past 3 months';
+  if (days < 365) return 'past year';
+  const years = Math.round(days / 365);
+  return `past ${years} year${years === 1 ? '' : 's'}`;
+}
+
 function SyncStatusDisplay({
   chunks,
   sync,
@@ -434,22 +441,6 @@ function SyncStatusDisplay({
 }) {
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState('');
-
-  // Baseline observation used to project ETA. Captured the first time we
-  // see this connector in the `syncing` state, cleared whenever it leaves
-  // that state. (items/sec is computed from items_synced delta since
-  // baseline, not from total elapsed sync time, so the estimate reflects
-  // the user's perceived progress rather than the full historical rate.)
-  const baselineRef = useRef<{ ts: number; items: number } | null>(null);
-  useEffect(() => {
-    if (sync?.state === 'syncing') {
-      if (baselineRef.current === null) {
-        baselineRef.current = { ts: Date.now(), items: sync.items_synced ?? 0 };
-      }
-    } else {
-      baselineRef.current = null;
-    }
-  }, [sync?.state]);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -491,74 +482,55 @@ function SyncStatusDisplay({
   // embedding chunks (often != source items) and the checkpoint is what
   // both the syncing and idle branches need to display consistently.
   const totalIndexed = sync?.items_synced ?? chunks;
-  const newThisRun = sync?.new_items_synced ?? null;
+  const itemsTotal = sync?.items_total ?? 0;
+  const backlogRange = formatBacklogRange(sync?.oldest_item_date);
+  // "Complete inbox" — the user has indexed everything reachable. Only
+  // surface this label when idle (during a sync we always show how far
+  // back we've gotten so far).
+  const isComplete =
+    totalIndexed > 0 && itemsTotal > 0 && totalIndexed >= itemsTotal;
 
-  // Actively syncing
+  // Actively syncing — single status line + reassurance line.
   if (sync?.state === 'syncing' || syncing) {
-    const itemsTotal = sync?.items_total ?? 0;
-    // Progress is measured against this-run delta vs. the new-items target,
-    // not against the cumulative total (which would always read as ~100%).
-    const runProgress = itemsTotal > 0 && newThisRun != null
-      ? Math.min(100, Math.round((newThisRun / itemsTotal) * 100))
-      : null;
-
-    // Project remaining time from items/sec since we first observed the
-    // sync running. Require ≥5s of observation and a positive delta so
-    // we don't surface a nonsense ETA in the first few seconds.
-    let etaLabel: string | null = null;
-    if (baselineRef.current && itemsTotal > 0 && newThisRun != null) {
-      const elapsedSec = (Date.now() - baselineRef.current.ts) / 1000;
-      const delta = totalIndexed - baselineRef.current.items;
-      if (elapsedSec > 5 && delta > 0) {
-        const rate = delta / elapsedSec;
-        const remaining = Math.max(0, itemsTotal - newThisRun);
-        etaLabel = formatEta(remaining / rate);
-      }
-    }
-
-    const newCount = newThisRun ?? 0;
+    const rangeLabel = backlogRange ?? 'building corpus';
     return (
       <div>
         <div style={{ fontSize: 11, color: 'var(--color-warning)', marginBottom: 4 }}>
-          Syncing —{' '}
-          <span key={newCount} className="sync-bump">
-            {newCount.toLocaleString()} new {unitLabel}
-          </span>
+          Indexed{' '}
+          <span key={totalIndexed} className="sync-bump">
+            {totalIndexed.toLocaleString()} {unitLabel}
+          </span>{' '}
           <span style={{ color: 'var(--color-text-tertiary)' }}>
-            {' '}({totalIndexed.toLocaleString()} total indexed)
+            ({rangeLabel})
+          </span>{' '}
+          <span style={{ color: 'var(--color-text-tertiary)' }}>
+            · Still indexing…
           </span>
-          {etaLabel && (
-            <span style={{ color: 'var(--color-text-tertiary)' }}> · {etaLabel}</span>
-          )}
         </div>
-        <div style={{
-          height: 4, borderRadius: 2,
-          background: 'var(--color-bg-tertiary)',
-          overflow: 'hidden',
-        }}>
-          <div style={{
-            height: '100%', borderRadius: 2,
-            background: 'var(--color-warning)',
-            width: runProgress != null ? `${runProgress}%` : '30%',
-            transition: 'width 0.5s ease',
-            animationName: runProgress == null ? 'pulse' : undefined,
-            animationDuration: runProgress == null ? '1.5s' : undefined,
-            animationIterationCount: runProgress == null ? 'infinite' : undefined,
-          }} />
+        <div style={{ fontSize: 10.5, color: 'var(--color-text-tertiary)' }}>
+          Deep Research available now · results improve as more {unitLabel} are indexed
         </div>
       </div>
     );
   }
 
-  // Idle — already has indexed items: show the corpus size + how long ago
-  // we last refreshed it, with a small Re-sync affordance.
+  // Idle — already has indexed items: show the corpus size + range or
+  // "complete inbox" label, plus how long ago we last refreshed it.
   if (totalIndexed > 0) {
     const lastSyncLabel = formatTimeAgo(sync?.last_sync);
+    const rangeLabel = isComplete
+      ? 'complete inbox'
+      : backlogRange;
     return (
       <div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 12, color: 'var(--color-success)' }}>
-            {totalIndexed.toLocaleString()} {unitLabel}
+            Indexed {totalIndexed.toLocaleString()} {unitLabel}
+            {rangeLabel && (
+              <span style={{ color: 'var(--color-text-tertiary)' }}>
+                {' '}({rangeLabel})
+              </span>
+            )}
             {lastSyncLabel && (
               <span style={{ color: 'var(--color-text-tertiary)' }}>
                 {' · '}Last synced {lastSyncLabel}

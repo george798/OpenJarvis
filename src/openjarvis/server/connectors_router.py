@@ -565,14 +565,35 @@ def create_connectors_router():
         # tens of thousands of items have already been ingested historically.
         # The checkpoint table is the source of truth.
         checkpoint: Optional[Dict[str, Any]] = None
+        oldest_item_date: Optional[str] = None
         try:
             from openjarvis.connectors.pipeline import IngestionPipeline
             from openjarvis.connectors.store import KnowledgeStore
             from openjarvis.connectors.sync_engine import SyncEngine
 
+            store = KnowledgeStore()
             checkpoint = SyncEngine(
-                pipeline=IngestionPipeline(store=KnowledgeStore()),
+                pipeline=IngestionPipeline(store=store),
             ).get_checkpoint(connector_id)
+
+            # Map connector_id → source field as written by the connector.
+            # Most match 1:1, but the IMAP/OAuth Gmail connectors both write
+            # source='gmail' so the unified card pulls a single timeline.
+            _STORE_SOURCE = {"gmail_imap": "gmail"}
+            store_source = _STORE_SOURCE.get(connector_id, connector_id)
+
+            # Oldest indexed item for this connector so the UI can show how
+            # far back the corpus reaches ("synced back to 2024-03-12").
+            # ISO 8601 strings sort correctly under MIN(); skip rows with no
+            # timestamp and any tombstoned chunks so the display reflects
+            # what's actually retrievable.
+            row = store._conn.execute(
+                "SELECT MIN(timestamp) FROM knowledge_chunks "
+                "WHERE source = ? AND timestamp != '' AND deleted_at IS NULL",
+                (store_source,),
+            ).fetchone()
+            if row is not None and row[0]:
+                oldest_item_date = str(row[0])
         except Exception:  # noqa: BLE001
             checkpoint = None
 
@@ -585,12 +606,12 @@ def create_connectors_router():
             items_synced = int(checkpoint["items_synced"])
         else:
             items_synced = status.items_synced
+        # items_total reflects the connector's currently-known target for
+        # this sync run (e.g. number of IMAP message IDs matched). Leave it
+        # at 0 when unknown — the UI uses items_synced >= items_total > 0 as
+        # the "complete inbox" signal, which would spuriously fire on every
+        # page load if we masked the zero with items_synced as a fallback.
         items_total = status.items_total
-        if not items_total and checkpoint:
-            # If the connector doesn't track total separately, surface the
-            # checkpointed count as the "total so far" so the UI shows real
-            # progress instead of a 0 / 0 placeholder.
-            items_total = items_synced
         last_sync_str: Optional[str]
         if status.last_sync:
             last_sync_str = status.last_sync.isoformat()
@@ -630,6 +651,7 @@ def create_connectors_router():
             "items_total": items_total,
             "new_items_synced": new_items_synced,
             "last_sync": last_sync_str,
+            "oldest_item_date": oldest_item_date,
             "error": effective_error,
         }
 

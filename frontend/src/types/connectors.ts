@@ -39,6 +39,10 @@ export interface SyncStatus {
   /** Items processed in the current (or most recent) run only. `null`
    *  when no sync has been triggered through this server session yet. */
   new_items_synced?: number | null;
+  /** ISO 8601 timestamp of the oldest indexed item, used to label how far
+   *  back the corpus reaches ("past 3 months", "past 5 years"). `null`
+   *  before anything is indexed. */
+  oldest_item_date?: string | null;
   last_sync: string | null;
   error: string | null;
 }
