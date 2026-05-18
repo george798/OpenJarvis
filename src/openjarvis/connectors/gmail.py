@@ -79,6 +79,38 @@ def _gmail_api_list_messages(
     return resp.json()
 
 
+def _gmail_api_trash_message(token: str, msg_id: str) -> None:
+    """Move a Gmail message to Trash via the ``messages.trash`` endpoint."""
+    resp = httpx.post(
+        f"{_GMAIL_API_BASE}/messages/{msg_id}/trash",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+
+
+def _gmail_api_modify_message(
+    token: str,
+    msg_id: str,
+    *,
+    add_labels: Optional[List[str]] = None,
+    remove_labels: Optional[List[str]] = None,
+) -> None:
+    """Modify labels on a Gmail message via the ``messages.modify`` endpoint."""
+    body: Dict[str, Any] = {}
+    if add_labels:
+        body["addLabelIds"] = add_labels
+    if remove_labels:
+        body["removeLabelIds"] = remove_labels
+    resp = httpx.post(
+        f"{_GMAIL_API_BASE}/messages/{msg_id}/modify",
+        headers={"Authorization": f"Bearer {token}"},
+        json=body,
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+
+
 def _gmail_api_get_message(token: str, msg_id: str) -> Dict[str, Any]:
     """Fetch a single Gmail message by ID (``full`` format).
 
@@ -231,6 +263,7 @@ class GmailConnector(BaseConnector):
         *,
         since: Optional[datetime] = None,
         cursor: Optional[str] = None,
+        query_extra: str = "",
     ) -> Iterator[Document]:
         """Yield :class:`Document` objects for Gmail messages.
 
@@ -244,6 +277,9 @@ class GmailConnector(BaseConnector):
             returned.  Translated to a Gmail ``after:<epoch>`` search query.
         cursor:
             ``nextPageToken`` from a previous sync to resume pagination.
+        query_extra:
+            Additional Gmail search operators appended to the base query,
+            e.g. ``"is:unread"`` to restrict to unread messages only.
         """
         tokens = load_tokens(self._credentials_path)
         if not tokens:
@@ -258,6 +294,8 @@ class GmailConnector(BaseConnector):
             # Gmail's after: operator accepts Unix epoch seconds.
             epoch = int(since.timestamp())
             query = f"category:primary after:{epoch}"
+        if query_extra:
+            query = f"{query} {query_extra}"
 
         page_token: Optional[str] = cursor
         synced = 0
@@ -320,6 +358,22 @@ class GmailConnector(BaseConnector):
 
         self._items_synced = synced
         self._last_sync = datetime.now()
+
+    def delete_message(self, msg_id: str) -> None:
+        """Move a message to Trash (recoverable for 30 days)."""
+        tokens = load_tokens(self._credentials_path)
+        if not tokens:
+            raise RuntimeError("Gmail not authenticated")
+        token = tokens.get("token", tokens.get("access_token", ""))
+        _gmail_api_trash_message(token, msg_id)
+
+    def archive_message(self, msg_id: str) -> None:
+        """Archive a message by removing the INBOX label."""
+        tokens = load_tokens(self._credentials_path)
+        if not tokens:
+            raise RuntimeError("Gmail not authenticated")
+        token = tokens.get("token", tokens.get("access_token", ""))
+        _gmail_api_modify_message(token, msg_id, remove_labels=["INBOX"])
 
     def sync_status(self) -> SyncStatus:
         """Return sync progress from the most recent :meth:`sync` call."""

@@ -962,6 +962,19 @@ class TracesConfig:
 
 
 @dataclass(slots=True)
+class ProactiveConfig:
+    """Proactive agent — autonomous action scheduling and approval routing."""
+
+    enabled: bool = False
+    schedule: str = "0 5 * * *"         # cron expression (default: 5am daily)
+    hours_back: int = 24                 # how many hours of unacted items to scan
+    timezone: str = "America/Los_Angeles"
+    # Channel to send approval notifications and receive yes/no replies.
+    # Format: "{type}:{id}", e.g. "imessage:+15551234567" or "telegram:123456789"
+    notification_channel: str = ""
+
+
+@dataclass(slots=True)
 class TelegramChannelConfig:
     """Per-channel config for Telegram."""
 
@@ -1463,6 +1476,7 @@ class JarvisConfig:
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     digest: DigestConfig = field(default_factory=DigestConfig)
+    proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
     mining: Optional["MiningConfig"] = None
 
     @property
@@ -1719,6 +1733,7 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
             "optimize",
             "agent_manager",
             "digest",
+            "proactive",
         )
         for section_name in top_sections:
             if section_name in data:
