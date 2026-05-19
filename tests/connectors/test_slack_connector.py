@@ -193,6 +193,133 @@ def test_sync_yields_documents(
 
 
 # ---------------------------------------------------------------------------
+# Test — conversations.list is called with every conversation type so
+# DMs and group DMs auto-sync alongside public/private channels.
+# ---------------------------------------------------------------------------
+
+
+@patch("openjarvis.connectors.slack_connector._slack_api_with_retry")
+def test_conversations_list_requests_all_conversation_types(mock_retry) -> None:
+    """``_slack_api_conversations_list`` widens ``types`` to cover IMs + MPIMs.
+
+    A user connecting Slack expects ``everything I can see is searchable``
+    without a per-channel opt-in — same as Gmail. The proxy for that here
+    is the API request shape: ``types`` must include im + mpim so the bot
+    token's DMs and group DMs come back in the listing.
+    """
+    from openjarvis.connectors.slack_connector import (  # noqa: PLC0415
+        _slack_api_conversations_list,
+    )
+
+    mock_retry.return_value = {"channels": [], "response_metadata": {}}
+    _slack_api_conversations_list("fake-token")
+
+    method, _token, params = mock_retry.call_args.args[:3]
+    assert method == "conversations.list"
+    types = params["types"].split(",")
+    assert set(types) == {"public_channel", "private_channel", "mpim", "im"}
+
+
+# ---------------------------------------------------------------------------
+# Test — sync() yields documents for DMs (im) and group DMs (mpim) too,
+# without requiring conversations.join (no join concept on those types).
+# ---------------------------------------------------------------------------
+
+
+@patch("openjarvis.connectors.slack_connector._slack_api_with_retry")
+@patch("openjarvis.connectors.slack_connector._slack_api_auth_test")
+@patch("openjarvis.connectors.slack_connector._slack_api_conversations_list")
+@patch("openjarvis.connectors.slack_connector._slack_api_conversations_history")
+@patch("openjarvis.connectors.slack_connector._slack_api_users_list")
+def test_sync_includes_dms_and_group_dms(
+    mock_users,
+    mock_history,
+    mock_channels,
+    mock_auth,
+    mock_retry,
+    connector,
+    tmp_path: Path,
+) -> None:
+    """IMs and MPIMs are synced without a join step and get sensible labels.
+
+    The fake ``conversations.list`` returns one public channel, one IM
+    (``is_im`` with the peer's ``user`` field), and one group DM
+    (``is_mpim``). All three yield documents. No ``conversations.join``
+    call is made for IM/MPIM because there's no join concept for them
+    on Slack's API.
+    """
+    creds_path = Path(connector._credentials_path)
+    creds_path.write_text(json.dumps({"token": "fake-token"}), encoding="utf-8")
+
+    mock_auth.return_value = _AUTH_TEST_RESPONSE
+    mock_users.return_value = _USERS_RESPONSE
+    mock_channels.return_value = {
+        "channels": [
+            {
+                "id": "C001",
+                "name": "general",
+                "is_member": True,
+            },
+            {
+                "id": "D001",
+                "is_im": True,
+                "user": "U001",  # 1:1 DM with Alice
+            },
+            {
+                "id": "G001",
+                "name": "mpdm-alice--bob-1",
+                "is_mpim": True,
+            },
+        ],
+        "response_metadata": {"next_cursor": ""},
+    }
+    mock_history.return_value = {
+        "messages": [
+            {
+                "ts": "1710500000.000100",
+                "user": "U001",
+                "text": "context-specific message",
+            },
+        ],
+        "has_more": False,
+    }
+    # _slack_api_with_retry is used for join + any unmocked endpoints.
+    # If sync ever tries to join an IM/MPIM, this records it as a call.
+    mock_retry.return_value = {"ok": False}
+
+    docs: List[Document] = list(connector.sync())
+
+    # One message per conversation × 3 conversations = 3 documents.
+    assert len(docs) == 3
+
+    by_chan_id = {d.metadata["channel_id"]: d for d in docs}
+
+    public_doc = by_chan_id["C001"]
+    assert public_doc.title == "#general"
+    assert public_doc.channel == "general"
+    assert public_doc.metadata["channel_type"] == "public_channel"
+
+    im_doc = by_chan_id["D001"]
+    assert im_doc.title == "DM with Alice"
+    assert im_doc.channel == "dm-Alice"
+    assert im_doc.metadata["channel_type"] == "im"
+
+    mpim_doc = by_chan_id["G001"]
+    assert mpim_doc.title == "#mpdm-alice--bob-1"
+    assert mpim_doc.channel == "mpdm-alice--bob-1"
+    assert mpim_doc.metadata["channel_type"] == "mpim"
+
+    # Critically, no join was attempted for IM/MPIM (the helper is only
+    # invoked via this mock for `conversations.join`).
+    join_calls = [
+        c
+        for c in mock_retry.call_args_list
+        if c.args and c.args[0] == "conversations.join"
+    ]
+    assert join_calls == []
+
+
+# ---------------------------------------------------------------------------
 # Test 5 — disconnect removes the credentials file
 # ---------------------------------------------------------------------------
 

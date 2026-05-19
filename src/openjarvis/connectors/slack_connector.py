@@ -55,8 +55,12 @@ def _slack_api_conversations_list(
     dict
         Raw API response containing ``channels`` list and ``response_metadata``.
     """
+    # Include every conversation type the bot can list — public + private
+    # channels, multi-person DMs, and 1:1 DMs — so a "connect and sync"
+    # flow indexes everything the token has access to without the user
+    # picking channels (matches Gmail's connect-and-go behavior).
     params: Dict[str, str] = {
-        "types": "public_channel,private_channel",
+        "types": "public_channel,private_channel,mpim,im",
         "exclude_archived": "true",
     }
     if cursor:
@@ -334,14 +338,33 @@ class SlackConnector(BaseConnector):
 
             for channel in channels:
                 chan_id: str = channel.get("id", "")
-                chan_name: str = channel.get("name", chan_id)
                 is_member: bool = channel.get("is_member", False)
                 is_private: bool = channel.get("is_private", False)
+                is_im: bool = channel.get("is_im", False)
+                is_mpim: bool = channel.get("is_mpim", False)
                 if not chan_id:
                     continue
 
-                # Auto-join public channels; skip private channels the bot isn't in
-                if not is_member:
+                # Derive a stable display name. IMs have no ``name`` field —
+                # use ``dm-<peer-name>`` so search results and citation chips
+                # show something readable instead of a raw "D0123" id.
+                raw_name: str = channel.get("name", "") or ""
+                if is_im:
+                    peer_id: str = channel.get("user", "") or ""
+                    peer_info = user_map.get(peer_id, {})
+                    peer_label = peer_info.get("name") or peer_id or "user"
+                    chan_name = f"dm-{peer_label}"
+                else:
+                    chan_name = raw_name or chan_id
+
+                # Membership semantics differ by channel type:
+                #   public_channel: bot may need to join (and can).
+                #   private_channel: requires invite — skip if not in.
+                #   im / mpim: no join concept; presence in conversations.list
+                #     implies the bot is already a participant.
+                if is_im or is_mpim:
+                    pass  # already accessible
+                elif not is_member:
                     if is_private:
                         continue  # Can't join private channels without invite
                     # Try to join the public channel
@@ -407,12 +430,22 @@ class SlackConnector(BaseConnector):
                         # _hit_url() receives).
                         doc_id = f"slack:{team_domain}:{chan_id}:{ts}"
 
+                        # Conversation type drives the channel label format.
+                        # Channels use ``#name``; DMs use ``DM with <peer>``
+                        # (more useful than ``#dm-alice`` in result chips).
+                        if is_im:
+                            title = (
+                                f"DM with {chan_name.removeprefix('dm-')}"
+                            )
+                        else:
+                            title = f"#{chan_name}"
+
                         doc = Document(
                             doc_id=doc_id,
                             source="slack",
                             doc_type="message",
                             content=text,
-                            title=f"#{chan_name}",
+                            title=title,
                             author=author_email or author_name,
                             participants=participants,
                             participants_raw=participants_raw,
@@ -423,6 +456,15 @@ class SlackConnector(BaseConnector):
                             metadata={
                                 "channel_id": chan_id,
                                 "channel_name": chan_name,
+                                "channel_type": (
+                                    "im"
+                                    if is_im
+                                    else "mpim"
+                                    if is_mpim
+                                    else "private_channel"
+                                    if is_private
+                                    else "public_channel"
+                                ),
                                 "user_id": user_id,
                                 "ts": ts,
                                 "team_id": team_id,
