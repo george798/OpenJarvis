@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Proactive agent tools — check/record permissions, queue and execute actions.
 
 These tools are used exclusively by ``ProactiveAgent`` to manage the
@@ -159,7 +160,13 @@ class QueueActionTool(BaseTool):
                         "description": "Approval tier.",
                     },
                 },
-                "required": ["action_type", "description", "payload", "permission_key", "tier"],
+                "required": [
+                    "action_type",
+                    "description",
+                    "payload",
+                    "permission_key",
+                    "tier",
+                ],
             },
             category="proactive",
         )
@@ -309,7 +316,11 @@ class RecordDecisionTool(BaseTool):
             tool_name=self.spec.name,
             success=True,
             content=msg,
-            metadata={"action_id": action_id, "approved": approved, "remembered": remember},
+            metadata={
+                "action_id": action_id,
+                "approved": approved,
+                "remembered": remember,
+            },
         )
 
 
@@ -348,7 +359,7 @@ class ExecutePendingActionsTool(BaseTool):
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Optional list of specific action IDs to execute. "
-                                       "If omitted, executes all approved actions.",
+                        "If omitted, executes all approved actions.",
                     },
                 },
             },
@@ -368,13 +379,15 @@ class ExecutePendingActionsTool(BaseTool):
         for action in actions:
             success, message = self._run_action(action)
             store.update_status(action.id, STATUS_EXECUTED)
-            results.append({
-                "id": action.id,
-                "action_type": action.action_type,
-                "description": action.description,
-                "success": success,
-                "message": message,
-            })
+            results.append(
+                {
+                    "id": action.id,
+                    "action_type": action.action_type,
+                    "description": action.description,
+                    "success": success,
+                    "message": message,
+                }
+            )
 
         return ToolResult(
             tool_name=self.spec.name,
@@ -518,6 +531,12 @@ def parse_approval_response(
     s = store or get_store()
     processed: List[Dict[str, Any]] = []
 
+    # Notification template displays ids as `[abc123]`; users naturally reply
+    # with `{abc123} yes`, `(abc123) yes`, etc.  Strip those surrounding
+    # brackets/braces/parens before regex matching so the word-boundary
+    # check sees a clean id.
+    text = re.sub(r"[\[\]\{\}\(\)]", " ", text)
+
     for m in _APPROVAL_RE.finditer(text):
         target = (m.group("target") or m.group("target2") or "").lower()
         raw_decision = (m.group("decision") or m.group("decision2") or "").lower()
@@ -531,9 +550,13 @@ def parse_approval_response(
                 new_status = STATUS_APPROVED if approved else STATUS_DENIED
                 s.update_status(action.id, new_status)
                 if always and action.tier in (TIER_LOW, TIER_MEDIUM):
-                    decision = DECISION_ALWAYS_APPROVE if approved else DECISION_ALWAYS_DENY
+                    decision = (
+                        DECISION_ALWAYS_APPROVE if approved else DECISION_ALWAYS_DENY
+                    )
                     s.set_permission(action.permission_key, decision, approved=approved)
-                processed.append({"id": action.id, "approved": approved, "remembered": always})
+                processed.append(
+                    {"id": action.id, "approved": approved, "remembered": always}
+                )
         else:
             action = s.get_action(target)
             if action is None:
@@ -544,7 +567,9 @@ def parse_approval_response(
             if remember:
                 decision = DECISION_ALWAYS_APPROVE if approved else DECISION_ALWAYS_DENY
                 s.set_permission(action.permission_key, decision, approved=approved)
-            processed.append({"id": target, "approved": approved, "remembered": remember})
+            processed.append(
+                {"id": target, "approved": approved, "remembered": remember}
+            )
 
     return processed
 

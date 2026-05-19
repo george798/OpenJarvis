@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Digest collection tool — fetches recent data from configured connectors."""
 
 from __future__ import annotations
@@ -157,13 +158,17 @@ def _format_strava(doc: Document) -> str:
 
 
 def _format_gmail(doc: Document) -> str:
-    """Format a Gmail email document."""
+    """Format a Gmail email document.
+
+    Includes ``doc_id`` so the proactive agent can reference the
+    real Gmail ``messages.get/modify`` id in its action proposals
+    instead of hallucinating one.
+    """
     sender = doc.author or "Unknown"
     subject = doc.title or "(no subject)"
     ago = _time_ago(doc.timestamp)
-    # Include body preview (first 150 chars, single line)
     body = doc.content.replace("\n", " ").strip()[:150] if doc.content else ""
-    line = f'[gmail] From: {sender} — "{subject}" ({ago})'
+    line = f'[gmail id={doc.doc_id}] From: {sender} — "{subject}" ({ago})'
     if body:
         line += f"\n  Preview: {body}"
     return line
@@ -174,7 +179,7 @@ def _format_gmail_imap(doc: Document) -> str:
     sender = doc.author or "Unknown"
     subject = doc.title or "(no subject)"
     ago = _time_ago(doc.timestamp)
-    return f'[gmail] From: {sender} — "{subject}" ({ago})'
+    return f'[gmail id={doc.doc_id}] From: {sender} — "{subject}" ({ago})'
 
 
 def _format_google_tasks(doc: Document) -> str:
@@ -271,7 +276,7 @@ def _format_gcalendar(doc: Document) -> str:
                 time_range = f" ({duration})"
             except (ValueError, TypeError):
                 pass
-    return f"[gcalendar] {time_str} — {title}{time_range}"
+    return f"[gcalendar id={doc.doc_id}] {time_str} — {title}{time_range}"
 
 
 def _format_spotify(doc: Document) -> str:

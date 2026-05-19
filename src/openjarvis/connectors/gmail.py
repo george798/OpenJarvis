@@ -20,6 +20,7 @@ from openjarvis.connectors.oauth import (
     build_google_auth_url,
     delete_tokens,
     load_tokens,
+    refresh_google_token,
     resolve_google_credentials,
     save_tokens,
 )
@@ -281,12 +282,10 @@ class GmailConnector(BaseConnector):
             Additional Gmail search operators appended to the base query,
             e.g. ``"is:unread"`` to restrict to unread messages only.
         """
+        # Early-out if we have no credentials file at all — actual token
+        # freshness is handled by _call_with_refresh below.
         tokens = load_tokens(self._credentials_path)
-        if not tokens:
-            return
-
-        token: str = tokens.get("token", tokens.get("access_token", ""))
-        if not token:
+        if not tokens or not (tokens.get("token") or tokens.get("access_token")):
             return
 
         # Use `in:inbox` instead of `category:primary` so the sync works for
@@ -304,8 +303,8 @@ class GmailConnector(BaseConnector):
         synced = 0
 
         while True:
-            list_resp = _gmail_api_list_messages(
-                token, page_token=page_token, query=query
+            list_resp = self._call_with_refresh(
+                _gmail_api_list_messages, page_token=page_token, query=query
             )
             messages: List[Dict[str, Any]] = list_resp.get("messages", [])
 
@@ -314,7 +313,7 @@ class GmailConnector(BaseConnector):
                 if not msg_id:
                     continue
 
-                msg = _gmail_api_get_message(token, msg_id)
+                msg = self._call_with_refresh(_gmail_api_get_message, msg_id)
                 payload: Dict[str, Any] = msg.get("payload", {})
                 headers: List[Dict[str, str]] = payload.get("headers", [])
 
@@ -362,21 +361,53 @@ class GmailConnector(BaseConnector):
         self._items_synced = synced
         self._last_sync = datetime.now()
 
-    def delete_message(self, msg_id: str) -> None:
-        """Move a message to Trash (recoverable for 30 days)."""
+    def _current_token(self) -> str:
+        """Return the cached access token (may be expired)."""
         tokens = load_tokens(self._credentials_path)
         if not tokens:
             raise RuntimeError("Gmail not authenticated")
-        token = tokens.get("token", tokens.get("access_token", ""))
-        _gmail_api_trash_message(token, msg_id)
+        return tokens.get("token") or tokens.get("access_token") or ""
+
+    def _refresh_token(self) -> str:
+        """Refresh the access token using the stored refresh token.
+
+        Raises ``RuntimeError`` if refresh fails (typically because the
+        refresh token has been revoked — user must re-authorise).
+        """
+        new = refresh_google_token(self._credentials_path)
+        if not new:
+            raise RuntimeError(
+                "Gmail token refresh failed — re-run `jarvis connect gmail`"
+            )
+        return new
+
+    def _call_with_refresh(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        """Invoke a ``_gmail_api_*`` function with auto-refresh on 401.
+
+        Tries with the cached token first.  If the call raises an
+        ``httpx.HTTPStatusError`` with a 401, refresh the access token
+        once and retry.  Any other failure propagates unchanged.
+        """
+        import httpx
+
+        token = self._current_token()
+        try:
+            return fn(token, *args, **kwargs)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 401:
+                raise
+            token = self._refresh_token()
+            return fn(token, *args, **kwargs)
+
+    def delete_message(self, msg_id: str) -> None:
+        """Move a message to Trash (recoverable for 30 days)."""
+        self._call_with_refresh(_gmail_api_trash_message, msg_id)
 
     def archive_message(self, msg_id: str) -> None:
         """Archive a message by removing the INBOX label."""
-        tokens = load_tokens(self._credentials_path)
-        if not tokens:
-            raise RuntimeError("Gmail not authenticated")
-        token = tokens.get("token", tokens.get("access_token", ""))
-        _gmail_api_modify_message(token, msg_id, remove_labels=["INBOX"])
+        self._call_with_refresh(
+            _gmail_api_modify_message, msg_id, remove_labels=["INBOX"]
+        )
 
     def sync_status(self) -> SyncStatus:
         """Return sync progress from the most recent :meth:`sync` call."""

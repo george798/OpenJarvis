@@ -66,10 +66,17 @@ Each action object must have these fields:
                  calendar_decline | calendar_accept | no_action
   - description: human-readable sentence explaining what you will do
   - payload: dict with the data needed to execute. ALWAYS include:
-      - doc_id: the full doc_id from the source data (e.g. "gmail:abc123", "gcalendar:xyz")
-      - For email actions: message_id (the raw Gmail message ID)
+      - doc_id: copy the value of ``id=...`` from the digest line, EXACTLY
+        as shown.  Example: a digest line ``[gmail id=gmail:18f9abc] From:
+        ...`` means ``doc_id`` must be ``"gmail:18f9abc"``.  NEVER invent
+        ids like ``"gmail:wells_fargo"`` or ``"msg_1"`` — the executor
+        will fail.  If a digest line has no ``id=...`` segment, do not
+        propose an action for that line.
+      - For email actions: message_id MUST be the part of doc_id after
+        the ``gmail:`` prefix (e.g. ``"18f9abc"``).
       - For sms actions: contact (phone/email), body (the message text)
-      - For calendar actions: event_id, calendar_id (default "primary")
+      - For calendar actions: event_id (the part after ``gcalendar:`` in
+        the digest's ``id=...``) and calendar_id (default "primary")
   - permission_key: pattern string like "email_delete:domain:noreply.github.com"
   - tier: one of trivial | low | medium | high
   - reasoning: one sentence why
