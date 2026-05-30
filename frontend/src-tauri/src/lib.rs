@@ -1455,6 +1455,79 @@ async fn delete_ollama_model(model_name: String) -> Result<serde_json::Value, St
     Ok(serde_json::json!({"status": "deleted", "model": model_name}))
 }
 
+// ---------------------------------------------------------------------------
+// Inference-source selection (~/.openjarvis/inference.json)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum SourceKind {
+    Ollama,
+    Custom,
+}
+
+impl Default for SourceKind {
+    fn default() -> Self {
+        SourceKind::Ollama
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
+struct InferenceConfig {
+    #[serde(default)]
+    kind: SourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    /// Bare base URL (no trailing `/v1`), custom only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
+    /// OpenAI-compatible engine key (e.g. "lmstudio"), custom only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engine: Option<String>,
+}
+
+/// Path to the inference-source config (~/.openjarvis/inference.json).
+fn inference_config_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(home_dir())
+        .join(".openjarvis")
+        .join("inference.json")
+}
+
+/// Parse config text. Any error (missing/garbage) yields the Ollama default —
+/// a broken file must never strand the user with no working inference source.
+fn parse_inference_config(text: &str) -> InferenceConfig {
+    serde_json::from_str::<InferenceConfig>(text).unwrap_or_default()
+}
+
+/// Read the on-disk inference config, or the Ollama default if absent.
+#[allow(dead_code)]
+fn read_inference_config() -> InferenceConfig {
+    match std::fs::read_to_string(inference_config_path()) {
+        Ok(text) => parse_inference_config(&text),
+        Err(_) => InferenceConfig::default(),
+    }
+}
+
+/// Write the inference config to disk (pretty JSON).
+#[allow(dead_code)]
+fn write_inference_config(cfg: &InferenceConfig) -> Result<(), String> {
+    let path = inference_config_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json + "\n").map_err(|e| format!("Failed to save inference config: {}", e))
+}
+
+/// Normalize a user-entered server URL to a bare base host: trim whitespace,
+/// drop a trailing `/v1` segment (the engine re-appends its own api prefix),
+/// then drop any trailing slash.
+fn normalize_host(raw: &str) -> String {
+    let s = raw.trim().trim_end_matches('/');
+    let s = s.strip_suffix("/v1").unwrap_or(s);
+    s.trim_end_matches('/').to_string()
+}
+
 /// Check speech backend health.
 #[tauri::command]
 async fn speech_health(api_url: String) -> Result<serde_json::Value, String> {
@@ -2001,7 +2074,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_local_model, format_uv_sync_failure, format_uv_sync_spawn_error, uv_sync_stderr_tail,
+        default_local_model, format_uv_sync_failure, format_uv_sync_spawn_error,
+        normalize_host, parse_inference_config, uv_sync_stderr_tail, SourceKind,
     };
     use std::path::Path;
 
@@ -2081,5 +2155,30 @@ mod tests {
     #[test]
     fn default_local_model_falls_back_when_nothing_fits() {
         assert_eq!(default_local_model(1.0), super::FALLBACK_MODEL);
+    }
+
+    #[test]
+    fn parse_defaults_to_ollama_when_file_missing_or_garbage() {
+        assert!(matches!(parse_inference_config("").kind, SourceKind::Ollama));
+        assert!(matches!(parse_inference_config("not json").kind, SourceKind::Ollama));
+    }
+
+    #[test]
+    fn parse_reads_custom_endpoint() {
+        let cfg = parse_inference_config(
+            r#"{"kind":"custom","model":"qwen2.5-7b","host":"http://localhost:1234","engine":"lmstudio"}"#,
+        );
+        assert!(matches!(cfg.kind, SourceKind::Custom));
+        assert_eq!(cfg.model.as_deref(), Some("qwen2.5-7b"));
+        assert_eq!(cfg.host.as_deref(), Some("http://localhost:1234"));
+        assert_eq!(cfg.engine.as_deref(), Some("lmstudio"));
+    }
+
+    #[test]
+    fn normalize_host_strips_trailing_slash_and_v1() {
+        assert_eq!(normalize_host("http://localhost:1234/v1"), "http://localhost:1234");
+        assert_eq!(normalize_host("http://localhost:1234/v1/"), "http://localhost:1234");
+        assert_eq!(normalize_host("http://localhost:1234/"), "http://localhost:1234");
+        assert_eq!(normalize_host("http://host:8000"), "http://host:8000");
     }
 }
