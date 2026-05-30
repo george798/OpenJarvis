@@ -983,3 +983,46 @@ export async function denyAction(actionId: string): Promise<void> {
   const res = await fetch(`${getBase()}/v1/approvals/${actionId}/deny`, { method: 'POST' });
   if (!res.ok) throw new Error(`Failed: ${res.status}`);
 }
+
+// ---------------------------------------------------------------------------
+// Inference source (desktop only)
+// ---------------------------------------------------------------------------
+
+export type InferenceSource = {
+  kind: 'ollama' | 'custom';
+  model?: string;
+  host?: string;
+  engine?: string;
+};
+
+export async function getInferenceSource(): Promise<InferenceSource> {
+  if (isTauri()) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<InferenceSource>('get_inference_source');
+    } catch (e: any) {
+      throw new Error(e?.message ?? e ?? 'Failed to read inference source');
+    }
+  }
+  return { kind: 'ollama' };
+}
+
+export async function setInferenceSource(
+  src: InferenceSource & { apiKey?: string },
+): Promise<void> {
+  if (!isTauri()) throw new Error('Inference source is configurable in the desktop app only.');
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke<void>('set_inference_source', {
+      kind: src.kind,
+      model: src.model ?? null,
+      host: src.host ?? null,
+      engine: src.engine ?? null,
+      apiKey: src.apiKey ?? null,
+    });
+  } catch (e: any) {
+    // Surface the backend's actionable error strings (e.g. "A server URL is
+    // required…", "Could not store the API key…") as proper Error instances.
+    throw new Error(e?.message ?? e ?? 'Failed to save inference source');
+  }
+}
