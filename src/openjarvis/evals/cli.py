@@ -660,13 +660,21 @@ def _run_terminalbench_native(config, console: Console) -> object:
     """Run TerminalBench V2.1 natively via terminal-bench Harness."""
     from openjarvis.evals.backends.terminalbench_native import (
         TerminalBenchNativeBackend,
+        summarize_benchmark_results,
     )
-    from openjarvis.evals.core.types import RunSummary
 
     model = config.model
     # LiteLLM expects "openai/<model>" for OpenAI-compatible servers
     litellm_model = f"openai/{model}"
     output_dir = getattr(config, "output_path", None) or "results/terminalbench-native/"
+
+    # Harness budgets: only forward explicit config values so the backend
+    # defaults (global_agent_timeout_sec=1800) apply otherwise.
+    timeout_kwargs = {}
+    if getattr(config, "global_agent_timeout_sec", None) is not None:
+        timeout_kwargs["global_agent_timeout_sec"] = config.global_agent_timeout_sec
+    if getattr(config, "global_timeout_multiplier", None) is not None:
+        timeout_kwargs["global_timeout_multiplier"] = config.global_timeout_multiplier
 
     backend = TerminalBenchNativeBackend(
         model=litellm_model,
@@ -675,6 +683,7 @@ def _run_terminalbench_native(config, console: Console) -> object:
         max_samples=config.max_samples,
         output_dir=output_dir,
         n_concurrent=config.max_workers or 4,
+        **timeout_kwargs,
     )
 
     import re
@@ -687,28 +696,20 @@ def _run_terminalbench_native(config, console: Console) -> object:
 
     results = backend.run_harness(run_id)
 
-    # Convert BenchmarkResults to RunSummary
-    total = len(results.trial_results) if hasattr(results, "trial_results") else 0
-    correct = 0
-    if hasattr(results, "trial_results"):
-        for tr in results.trial_results:
-            if getattr(tr, "is_resolved", False):
-                correct += 1
-
-    accuracy = correct / total if total > 0 else 0.0
-    return RunSummary(
-        benchmark="terminalbench-native",
-        category="agentic",
-        backend="terminalbench-native",
-        model=model,
-        total_samples=total,
-        scored_samples=total,
-        correct=correct,
-        accuracy=accuracy,
-        errors=0,
-        mean_latency_seconds=0.0,
-        total_cost_usd=0.0,
-    )
+    # Convert BenchmarkResults to RunSummary, classifying harness/infra
+    # failures (e.g. zero-model-contact setup hangs) out of the resolve-rate.
+    summary, harness_failures = summarize_benchmark_results(results, model=model)
+    if harness_failures:
+        console.print(
+            f"  [red bold]{len(harness_failures)} harness/infra failure(s) "
+            "excluded from resolve-rate:[/red bold]"
+        )
+        for failure in harness_failures:
+            console.print(
+                f"  [red]- {failure['task_id']}: {failure['reason']} "
+                f"(failure_mode={failure['failure_mode']})[/red]"
+            )
+    return summary
 
 
 def _run_single(config, console: Optional[Console] = None) -> object:
@@ -964,7 +965,9 @@ def _print_agentic_summary(console: Console, traces, config) -> None:
     from rich.table import Table
 
     completed = sum(1 for t in traces if t.completed)
-    resolved = sum(1 for t in traces if t.is_resolved is True)
+    harness_errors = [t for t in traces if t.error_kind == "harness_error"]
+    model_traces = [t for t in traces if t.error_kind != "harness_error"]
+    resolved = sum(1 for t in model_traces if t.is_resolved is True)
     timed_out = sum(1 for t in traces if t.timed_out)
     total_turns = sum(t.num_turns for t in traces)
     total_tool_calls = sum(t.total_tool_calls for t in traces)
@@ -992,8 +995,11 @@ def _print_agentic_summary(console: Console, traces, config) -> None:
     table.add_row("Queries", str(len(traces)))
     table.add_row("Completed", f"{completed}/{len(traces)}")
     if any(t.is_resolved is not None for t in traces):
-        table.add_row("Resolved", f"{resolved}/{len(traces)}")
+        # Harness errors are excluded from the resolve-rate denominator:
+        # they are infra failures, not model misses.
+        table.add_row("Resolved", f"{resolved}/{len(model_traces)}")
     table.add_row("Timed out", str(timed_out))
+    table.add_row("Harness errors", str(len(harness_errors)))
     table.add_row("Total turns", str(total_turns))
     avg_t = f"{total_turns / len(traces):.1f}" if traces else "0"
     table.add_row("Avg turns/query", avg_t)
@@ -1019,6 +1025,19 @@ def _print_agentic_summary(console: Console, traces, config) -> None:
         )
 
     console.print(table)
+
+    if harness_errors:
+        console.print(
+            f"[red bold]{len(harness_errors)} harness/infra failure(s) "
+            "excluded from resolve-rate:[/red bold]"
+        )
+        for t in harness_errors[:5]:
+            console.print(f"[red]  {t.query_id}: {(t.error or '')[:300]}[/red]")
+        if len(harness_errors) > 5:
+            console.print(
+                f"[red]  ... and {len(harness_errors) - 5} more "
+                "(see traces.jsonl)[/red]"
+            )
 
 
 def _run_from_config(
