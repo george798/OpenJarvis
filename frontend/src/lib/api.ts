@@ -174,6 +174,18 @@ export async function pullModel(modelName: string): Promise<void> {
   }
 }
 
+export async function saveCloudKey(keyName: string, keyValue: string): Promise<void> {
+  const res = await apiFetch('/v1/cloud/keys', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key_name: keyName, key_value: keyValue }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => res.statusText);
+    throw new Error(`Failed to save cloud key: ${detail}`);
+  }
+}
+
 export async function deleteModel(modelName: string): Promise<void> {
   if (isTauri()) {
     try {

@@ -759,6 +759,35 @@ async def delete_model(model_name: str, request: Request):
     return {"status": "deleted", "model": model_name}
 
 
+@router.post("/v1/cloud/keys")
+async def save_cloud_key(request: Request):
+    """Persist a cloud provider API key for Docker / browser UI users.
+
+    The desktop Tauri app writes ~/.openjarvis/cloud-keys.env directly; the
+    web UI must use this endpoint so generation can route to OpenRouter etc.
+    """
+    from openjarvis.server.cloud_router import ALLOWED_CLOUD_KEY_NAMES, persist_cloud_key
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}") from exc
+
+    key_name = str(body.get("key_name", "")).strip()
+    key_value = str(body.get("key_value", ""))
+    if not key_name:
+        raise HTTPException(status_code=400, detail="key_name is required")
+    if key_name not in ALLOWED_CLOUD_KEY_NAMES:
+        raise HTTPException(status_code=400, detail=f"Unsupported key name: {key_name}")
+
+    try:
+        persist_cloud_key(key_name, key_value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await reload_cloud_engine(request)
+
+
 @router.post("/v1/cloud/reload")
 async def reload_cloud_engine(request: Request):
     """Hot-reload cloud API keys and (re-)initialize the cloud engine.

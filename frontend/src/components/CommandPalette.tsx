@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Search, Cpu, X, Download, Loader2, Trash2, Check, Cloud, Key, Eye, EyeOff } from 'lucide-react';
 import { useAppStore } from '../lib/store';
-import { pullModel, deleteModel, fetchModels, preloadModel, isTauri } from '../lib/api';
+import { pullModel, deleteModel, fetchModels, preloadModel, isTauri, saveCloudKey } from '../lib/api';
 
 /** Popular models that users can download from the catalogue. */
 const CATALOGUE_MODELS = [
@@ -66,6 +66,16 @@ const CLOUD_PROVIDERS: CloudProvider[] = [
       { id: 'openrouter/auto', desc: 'Auto — best model for the task' },
       { id: 'openrouter/anthropic/claude-sonnet-4', desc: 'Claude Sonnet 4 via OpenRouter' },
       { id: 'openrouter/deepseek/deepseek-r1', desc: 'DeepSeek R1 via OpenRouter' },
+    ],
+  },
+  {
+    name: 'NVIDIA NIM',
+    envKey: 'NVIDIA_NIM_API_KEY',
+    storageKey: 'openjarvis-nvidia-nim-key',
+    models: [
+      { id: 'nvidia_nim/meta/llama-3.1-8b-instruct', desc: 'Llama 3.1 8B Instruct (NVIDIA NIM)' },
+      { id: 'nvidia_nim/meta/llama-3.1-70b-instruct', desc: 'Llama 3.1 70B Instruct (NVIDIA NIM)' },
+      { id: 'nvidia_nim/google/gemma-2-9b-it', desc: 'Gemma 2 9B IT (NVIDIA NIM)' },
     ],
   },
 ];
@@ -213,12 +223,19 @@ export function CommandPalette() {
     setStoredKey(provider.storageKey, value);
     setApiKeys((prev) => ({ ...prev, [provider.storageKey]: value }));
 
-    // Also save to Tauri backend so the server process picks up the key
-    if (isTauri()) {
-      try {
+    // Persist to server-side cloud-keys.env (Tauri desktop or Docker web UI).
+    try {
+      if (isTauri()) {
         const { invoke } = await import('@tauri-apps/api/core');
         await invoke('save_cloud_key', { keyName: provider.envKey, keyValue: value });
-      } catch {}
+      } else {
+        await saveCloudKey(provider.envKey, value);
+      }
+    } catch (e: any) {
+      useAppStore.getState().addLogEntry({
+        timestamp: Date.now(), level: 'error', category: 'model',
+        message: `${provider.name} key saved in browser only — server persist failed: ${e?.message || e}`,
+      });
     }
 
     useAppStore.getState().addLogEntry({

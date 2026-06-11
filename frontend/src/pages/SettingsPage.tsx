@@ -19,27 +19,49 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useAppStore, type ThemeMode } from '../lib/store';
-import { checkHealth, fetchSpeechHealth, getMemoryStats, getInferenceSource, setInferenceSource, type InferenceSource } from '../lib/api';
+import { checkHealth, fetchSpeechHealth, getMemoryStats, getInferenceSource, setInferenceSource, fetchModels, type InferenceSource } from '../lib/api';
 import { isAutoUpdateDisabled, setAutoUpdateDisabled } from '../components/Desktop/UpdateChecker';
 
 function OllamaModelList() {
-  const [models, setModels] = useState<Array<{ name: string; size: number }>>([]);
-  useEffect(() => {
-    fetch('http://localhost:11434/api/tags')
-      .then(r => r.json())
-      .then(data => setModels((data.models || []).map((m: any) => ({ name: m.name, size: m.size }))))
-      .catch(() => setModels([]));
+  const [models, setModels] = useState<Array<{ name: string }>>([]);
+  const [loading, setLoading] = useState(true);
+  const settings = useAppStore((s) => s.settings);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    fetchModels()
+      .then((data) => setModels(data.map((m) => ({ name: m.id }))))
+      .catch(() => setModels([]))
+      .finally(() => setLoading(false));
   }, []);
-  if (models.length === 0) return <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>No models loaded</span>;
+
+  useEffect(() => {
+    load();
+  }, [load, settings.apiKey, settings.apiUrl]);
+
+  if (loading) {
+    return <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>Loading models...</span>;
+  }
+  if (models.length === 0) {
+    return (
+      <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+        No models loaded — set API key above, then refresh
+      </span>
+    );
+  }
   return (
     <div className="flex flex-wrap gap-1">
       {models.map(m => (
         <span key={m.name} className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px]"
           style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text)' }}>
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--color-success)', display: 'inline-block' }} />
-          {m.name} ({(m.size / 1e9).toFixed(1)} GB)
+          {m.name}
         </span>
       ))}
+      <button type="button" onClick={load} className="text-[10px] px-2 py-0.5 rounded cursor-pointer"
+        style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}>
+        Refresh
+      </button>
     </div>
   );
 }
@@ -428,6 +450,7 @@ export function SettingsPage() {
                 <CloudProviderStatus label="Anthropic" storageKey="openjarvis-anthropic-key" />
                 <CloudProviderStatus label="Google" storageKey="openjarvis-gemini-key" />
                 <CloudProviderStatus label="OpenRouter" storageKey="openjarvis-openrouter-key" />
+                <CloudProviderStatus label="NVIDIA NIM" storageKey="openjarvis-nvidia-nim-key" />
               </div>
             </SettingRow>
           </Section>
@@ -445,6 +468,9 @@ export function SettingsPage() {
             </SettingRow>
             <SettingRow label="OpenRouter" description="Multi-provider routing">
               <ApiKeyInput storageKey="openjarvis-openrouter-key" placeholder="sk-or-..." />
+            </SettingRow>
+            <SettingRow label="NVIDIA NIM" description="build.nvidia.com cloud inference (also set in compose .env)">
+              <ApiKeyInput storageKey="openjarvis-nvidia-nim-key" placeholder="nvapi-..." />
             </SettingRow>
           </Section>
 

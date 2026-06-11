@@ -55,11 +55,56 @@ def _load_keys() -> dict[str, str]:
         "GOOGLE_API_KEY",
         "OPENROUTER_API_KEY",
         "MINIMAX_API_KEY",
+        "NVIDIA_NIM_API_KEY",
     ):
         val = os.environ.get(name)
         if val:
             keys[name] = val
     return keys
+
+
+ALLOWED_CLOUD_KEY_NAMES = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENROUTER_API_KEY",
+        "MINIMAX_API_KEY",
+        "NVIDIA_NIM_API_KEY",
+    }
+)
+
+
+def persist_cloud_key(key_name: str, key_value: str) -> None:
+    """Write or remove a cloud API key in ~/.openjarvis/cloud-keys.env."""
+    if key_name not in ALLOWED_CLOUD_KEY_NAMES:
+        raise ValueError(f"Unsupported cloud key name: {key_name}")
+
+    _CLOUD_ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    keys: dict[str, str] = {}
+    if _CLOUD_ENV_FILE.exists():
+        for raw in _CLOUD_ENV_FILE.read_text().splitlines():
+            line = raw.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                keys[k.strip()] = v.strip()
+
+    value = key_value.strip()
+    if value:
+        keys[key_name] = value
+        os.environ[key_name] = value
+    else:
+        keys.pop(key_name, None)
+        os.environ.pop(key_name, None)
+
+    content = "\n".join(f"{k}={v}" for k, v in sorted(keys.items()))
+    _CLOUD_ENV_FILE.write_text(f"{content}\n" if content else "")
+    try:
+        _CLOUD_ENV_FILE.chmod(0o600)
+    except OSError:
+        pass
 
 
 def get_provider(model: str) -> str | None:
@@ -74,6 +119,8 @@ def get_provider(model: str) -> str | None:
         return "minimax"
     if any(model.startswith(org) for org in _LOCAL_HF_ORGS):
         return None  # local model, never route to cloud
+    if model.startswith("nvidia_nim/"):
+        return "nvidia_nim"
     if "/" in model:  # openrouter format: "meta-llama/llama-3-8b"
         return "openrouter"
     return None
@@ -377,6 +424,25 @@ async def stream_cloud(
             max_tokens,
             base_url="https://openrouter.ai/api/v1",
             api_key_name="OPENROUTER_API_KEY",
+        ):
+            yield token
+
+    elif provider == "nvidia_nim":
+        keys = _load_keys()
+        api_key = keys.get("NVIDIA_NIM_API_KEY", "")
+        if not api_key:
+            raise ValueError(
+                "NVIDIA_NIM_API_KEY not set — add it in D:\\OpenJarvis\\compose\\.env "
+                "or the Cloud Models tab"
+            )
+        api_model = model[len("nvidia_nim/") :] if model.startswith("nvidia_nim/") else model
+        async for token in _stream_openai(
+            api_model,
+            messages,
+            temperature,
+            max_tokens,
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key_name="NVIDIA_NIM_API_KEY",
         ):
             yield token
 

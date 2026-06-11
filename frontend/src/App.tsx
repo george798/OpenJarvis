@@ -65,8 +65,9 @@ export default function App() {
     return () => clearInterval(interval);
   }, [importOverlay]);
 
-  // Fetch models on mount
+  // Fetch models on mount and when API credentials change
   useEffect(() => {
+    setModelsLoading(true);
     fetchModels()
       .then((m) => {
         setModels(m);
@@ -74,7 +75,7 @@ export default function App() {
       })
       .catch(() => setModels([]))
       .finally(() => setModelsLoading(false));
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [settings.apiKey, settings.apiUrl]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch server info
   useEffect(() => {
