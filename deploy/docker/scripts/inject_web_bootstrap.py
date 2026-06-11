@@ -25,9 +25,6 @@ def main() -> None:
         return
 
     html = index_path.read_text(encoding="utf-8")
-    if MARKER in html:
-        print("[openjarvis] Web bootstrap already present")
-        return
 
     payload = json.dumps(api_key)
     script = f"""<script {MARKER}>
@@ -36,12 +33,30 @@ def main() -> None:
     var key = {payload};
     var raw = localStorage.getItem("openjarvis-settings") || "{{}}";
     var settings = JSON.parse(raw);
-    if (!settings.apiKey) settings.apiKey = key;
+    // Always sync from container env so a wrong manual paste cannot stick.
+    settings.apiKey = key;
     if (!settings.apiUrl) settings.apiUrl = window.location.origin;
     localStorage.setItem("openjarvis-settings", JSON.stringify(settings));
   }} catch (e) {{}}
 }})();
 </script>"""
+
+    if MARKER in html:
+        import re
+
+        updated = re.sub(
+            rf"<script {re.escape(MARKER)}>.*?</script>",
+            script,
+            html,
+            count=1,
+            flags=re.DOTALL,
+        )
+        if updated != html:
+            index_path.write_text(updated, encoding="utf-8")
+            print("[openjarvis] Web UI bootstrap updated (API key resynced)")
+        else:
+            print("[openjarvis] Web bootstrap present but could not update")
+        return
 
     if "</head>" not in html:
         print("[openjarvis] Web bootstrap skipped: </head> missing")

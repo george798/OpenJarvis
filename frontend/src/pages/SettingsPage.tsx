@@ -367,7 +367,7 @@ export function SettingsPage() {
                 }}
               />
             </SettingRow>
-            <SettingRow label="API key" description="Required only if the server was started with an API key">
+            <SettingRow label="API key" description="OPENJARVIS_API_KEY from compose/.env — not your NVIDIA/OpenRouter key. Docker auto-fills this on refresh.">
               <input
                 type="password"
                 value={settings.apiKey}

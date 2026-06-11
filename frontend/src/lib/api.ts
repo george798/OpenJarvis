@@ -62,7 +62,7 @@ export const getApiKey = (): string => {
     const raw = localStorage.getItem('openjarvis-settings');
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed.apiKey) return String(parsed.apiKey);
+      if (parsed.apiKey) return String(parsed.apiKey).trim();
     }
   } catch {}
   if (import.meta.env.VITE_OPENJARVIS_API_KEY) {
