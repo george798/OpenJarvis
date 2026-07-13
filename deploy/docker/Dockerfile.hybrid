@@ -5,6 +5,7 @@ WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci --ignore-scripts 2>/dev/null || npm install
 COPY frontend/ .
+ENV VITE_DISABLE_PWA=1
 RUN npm run build
 
 FROM python:3.12-slim-bookworm AS builder
@@ -25,20 +26,27 @@ COPY deploy/windows deploy/windows
 COPY --from=frontend /src/openjarvis/server/static src/openjarvis/server/static/
 
 RUN pip install --no-cache-dir uv && \
-    uv pip install --system ".[server,inference-cloud,inference-litellm,memory-faiss]" && \
-    uv pip install --system "mcp>=1.26" "maturin>=1.12" && \
+    uv pip install --system ".[server,inference-cloud,inference-litellm,memory-faiss,speech,speech-kokoro,browser,tools-search]" && \
+    uv pip install --system "mcp>=1.26" "maturin>=1.12" "markitdown[all]" "pdfplumber" && \
     maturin build --release -m rust/crates/openjarvis-python/Cargo.toml -o /tmp/wheels && \
     uv pip install --system /tmp/wheels/*.whl
 
 FROM python:3.12-slim-bookworm
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl && \
+    apt-get install -y --no-install-recommends curl ffmpeg git && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local /usr/local
 COPY --from=builder /app /app
 WORKDIR /app
+
+# Playwright Chromium for browser_navigate / browser_* agent tools.
+# Browsers live under /opt/playwright (not /root/.cache) so the host cache
+# volume mount in docker-compose does not hide them on container start.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN mkdir -p /opt/playwright && \
+    playwright install --with-deps chromium
 
 COPY deploy/docker/scripts/ /app/deploy/docker/scripts/
 RUN sed -i 's/\r$//' /app/deploy/docker/scripts/entrypoint.sh && \

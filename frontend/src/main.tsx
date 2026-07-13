@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import App from './App';
-import { initApiBase } from './lib/api';
+import { initApiBase, initWebSession } from './lib/api';
 import { initAnalytics } from './lib/analytics';
 import './index.css';
 
@@ -23,6 +23,7 @@ function applyTheme() {
 }
 
 applyTheme();
+void initWebSession();
 
 // Fetch the API base URL from the Tauri backend before rendering.
 // This ensures JARVIS_PORT is defined in one place (the Rust backend).

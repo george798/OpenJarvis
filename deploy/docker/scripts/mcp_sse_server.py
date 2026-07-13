@@ -21,6 +21,26 @@ from mcp.types import TextContent, Tool
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("openjarvis.mcp_sse")
 
+# Register the full built-in tool set (browser, skills, KG, media, scheduler,
+# ...) before MCPServer's auto-discovery runs — otherwise only the ~14 core
+# tools it imports directly are exposed over SSE.
+import openjarvis.tools  # noqa: F401
+
+try:
+    import openjarvis.scheduler.tools  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.agent_tools  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.proactive_tools  # noqa: F401
+except ImportError:
+    pass
+
 # OpenJarvis internal MCP server (JSON-RPC tools)
 from openjarvis.mcp.protocol import MCPRequest
 from openjarvis.mcp.server import MCPServer

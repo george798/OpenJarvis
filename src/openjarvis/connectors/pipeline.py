@@ -101,9 +101,9 @@ class IngestionPipeline:
     # ------------------------------------------------------------------
 
     def _load_existing_doc_ids(self) -> None:
-        """Populate ``_seen_doc_ids`` from rows already in the store."""
+        """Populate ``_seen_doc_ids`` from active (non-deleted) rows in the store."""
         rows = self._store._conn.execute(
-            "SELECT DISTINCT doc_id FROM knowledge_chunks"
+            "SELECT DISTINCT doc_id FROM knowledge_chunks WHERE deleted_at IS NULL"
         ).fetchall()
         self._seen_doc_ids = {r[0] for r in rows}
 

@@ -95,14 +95,25 @@ class TaskScheduler:
         *,
         poll_interval: int = 60,
         bus: Any = None,
+        config: Any = None,
+        channel_bridge: Any = None,
     ) -> None:
         self._store = store
         self._system = system
         self._poll_interval = poll_interval
         self._bus = bus
+        self._config = config
+        self._channel_bridge = channel_bridge
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+
+    def set_delivery(self, *, config: Any = None, channel_bridge: Any = None) -> None:
+        """Attach config and channel bridge for Hermes-style result delivery."""
+        if config is not None:
+            self._config = config
+        if channel_bridge is not None:
+            self._channel_bridge = channel_bridge
 
     # -- Public API ----------------------------------------------------------
 
@@ -217,7 +228,11 @@ class TaskScheduler:
         error_text = ""
 
         try:
-            if self._system is not None:
+            meta = task.metadata or {}
+            if meta.get("no_agent"):
+                result_text = task.prompt
+                success = True
+            elif self._system is not None:
                 raw_tools = (
                     task.tools
                     if isinstance(task.tools, list)
@@ -226,11 +241,16 @@ class TaskScheduler:
                 tools_list = (
                     [t.strip() for t in raw_tools if t.strip()] if task.tools else []
                 )
+                if not tools_list and self._config is not None:
+                    from openjarvis.hermes.toolsets import resolve_tool_names
+
+                    resolved = resolve_tool_names("cron", self._config)
+                    if resolved is not None:
+                        tools_list = resolved
                 ask_kwargs: Dict[str, Any] = {
                     "agent": task.agent,
                     "tools": tools_list if tools_list else None,
                 }
-                meta = task.metadata or {}
                 if meta.get("operator_id"):
                     ask_kwargs["system_prompt"] = meta.get("system_prompt", "")
                     ask_kwargs["operator_id"] = meta["operator_id"]
@@ -238,6 +258,8 @@ class TaskScheduler:
                     task.prompt,
                     **ask_kwargs,
                 )
+                if isinstance(result_text, dict):
+                    result_text = result_text.get("content", str(result_text))
             else:
                 result_text = f"[dry-run] Would execute: {task.prompt}"
             success = True
@@ -277,7 +299,33 @@ class TaskScheduler:
                     "success": success,
                     "result": result_text,
                     "error": error_text,
+                    "prompt": task.prompt,
+                    "metadata": task.metadata or {},
                 },
+            )
+
+        # Hermes-style explicit delivery to a messaging channel
+        if (
+            success
+            and self._config is not None
+            and getattr(self._config.scheduler, "delivery_enabled", True)
+        ):
+            from openjarvis.hermes.delivery import deliver_scheduled_result
+
+            deliver_scheduled_result(
+                task_id=task.id,
+                prompt=task.prompt,
+                result_text=result_text if isinstance(result_text, str) else str(result_text),
+                success=success,
+                error_text=error_text,
+                metadata=task.metadata or {},
+                channel_bridge=self._channel_bridge,
+                default_channel=getattr(
+                    self._config.scheduler, "default_delivery_channel", ""
+                ),
+                default_recipient=getattr(
+                    self._config.scheduler, "default_delivery_recipient", ""
+                ),
             )
 
     def _compute_next_run(self, task: ScheduledTask) -> Optional[str]:

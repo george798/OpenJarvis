@@ -1,10 +1,11 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { MessageBubble } from './MessageBubble';
 import { InputArea } from './InputArea';
+import { JarvisOrb } from './JarvisOrb';
 import { StreamingDots } from './StreamingDots';
 import { useAppStore } from '../../lib/store';
-import { Sparkles, PanelRightOpen, PanelRightClose, Database, MessageSquare, X } from 'lucide-react';
+import { Database, MessageSquare, X, PanelRightOpen, PanelRightClose } from 'lucide-react';
 import { listConnectors } from '../../lib/connectors-api';
 
 function getGreeting(): string {
@@ -47,10 +48,13 @@ export function ChatArea() {
 
   const isEmpty = messages.length === 0 && !streamState.isStreaming;
 
+  const voiceControl = useAppStore((s) => s.voiceControl);
+  const voiceAssistantEnabled = useAppStore((s) => s.settings.voiceAssistantEnabled);
+
   const PanelIcon = systemPanelOpen ? PanelRightClose : PanelRightOpen;
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full relative">
       {/* Toggle bar */}
       <div className="flex items-center justify-end px-3 py-1.5 shrink-0">
         <button
@@ -99,17 +103,26 @@ export function ChatArea() {
       >
         {isEmpty ? (
           <div className="flex flex-col items-center justify-center h-full px-4">
-            <div
-              className="w-12 h-12 rounded-2xl flex items-center justify-center mb-4"
-              style={{ background: 'var(--color-accent-subtle)', color: 'var(--color-accent)' }}
+            {voiceAssistantEnabled && voiceControl && (
+              <JarvisOrb
+                size="hero"
+                state={voiceControl.orbState}
+                onClick={voiceControl.toggleMic}
+                disabled={voiceControl.disabled}
+                label="Talk to Jarvis"
+                hint="Click the orb or press Ctrl+M"
+              />
+            )}
+            <h2
+              className={`text-xl font-semibold mb-2 ${voiceAssistantEnabled && voiceControl ? 'mt-6' : ''}`}
+              style={{ color: 'var(--color-text)' }}
             >
-              <Sparkles size={24} />
-            </div>
-            <h2 className="text-xl font-semibold mb-2" style={{ color: 'var(--color-text)' }}>
               {getGreeting()}
             </h2>
             <p className="text-sm text-center max-w-sm mb-6" style={{ color: 'var(--color-text-secondary)' }}>
-              Ask anything. Your AI runs locally — private, fast, and always available.
+              {voiceAssistantEnabled
+                ? 'Speak or type — your AI runs locally, private and always available.'
+                : 'Ask anything. Your AI runs locally — private, fast, and always available.'}
             </p>
 
             {/* Quick action hints */}
@@ -172,6 +185,16 @@ export function ChatArea() {
           </div>
         )}
       </div>
+      {voiceAssistantEnabled && voiceControl && !isEmpty && (
+        <div className="jarvis-orb-float" aria-hidden={false}>
+          <JarvisOrb
+            size="compact"
+            state={voiceControl.orbState}
+            onClick={voiceControl.toggleMic}
+            disabled={voiceControl.disabled}
+          />
+        </div>
+      )}
       <InputArea />
     </div>
   );

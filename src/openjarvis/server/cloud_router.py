@@ -42,7 +42,7 @@ def _load_keys() -> dict[str, str]:
     keys: dict[str, str] = {}
     # File first, then fall back to process environment
     if _CLOUD_ENV_FILE.exists():
-        for raw in _CLOUD_ENV_FILE.read_text().splitlines():
+        for raw in _CLOUD_ENV_FILE.read_text(encoding="utf-8-sig").splitlines():
             line = raw.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
@@ -56,11 +56,20 @@ def _load_keys() -> dict[str, str]:
         "OPENROUTER_API_KEY",
         "MINIMAX_API_KEY",
         "NVIDIA_NIM_API_KEY",
+        "FISH_API_KEY",
+        "CARTESIA_API_KEY",
     ):
         val = os.environ.get(name)
         if val:
             keys[name] = val
     return keys
+
+
+def apply_cloud_keys_to_environ() -> None:
+    """Merge ``cloud-keys.env`` into ``os.environ`` at server startup."""
+    for name, value in _load_keys().items():
+        if value:
+            os.environ[name] = value
 
 
 ALLOWED_CLOUD_KEY_NAMES = frozenset(
@@ -72,6 +81,8 @@ ALLOWED_CLOUD_KEY_NAMES = frozenset(
         "OPENROUTER_API_KEY",
         "MINIMAX_API_KEY",
         "NVIDIA_NIM_API_KEY",
+        "FISH_API_KEY",
+        "CARTESIA_API_KEY",
     }
 )
 
@@ -85,7 +96,7 @@ def persist_cloud_key(key_name: str, key_value: str) -> None:
 
     keys: dict[str, str] = {}
     if _CLOUD_ENV_FILE.exists():
-        for raw in _CLOUD_ENV_FILE.read_text().splitlines():
+        for raw in _CLOUD_ENV_FILE.read_text(encoding="utf-8-sig").splitlines():
             line = raw.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)

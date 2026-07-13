@@ -754,3 +754,124 @@
   background: var(--color-accent);
   text-decoration: none;
 }
+
+/* ── Jarvis voice orb (Iron Man HUD sphere) ─────────────────────────── */
+
+@keyframes jarvis-orb-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes jarvis-orb-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+.jarvis-orb-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.jarvis-orb-wrap--hero {
+  animation: jarvis-orb-float 4.5s ease-in-out infinite;
+}
+
+.jarvis-orb-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 50%;
+  transition: transform 200ms ease, filter 200ms ease;
+}
+
+.jarvis-orb-btn:hover:not(:disabled) {
+  transform: scale(1.04);
+  filter: brightness(1.08);
+}
+
+.jarvis-orb-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.jarvis-orb-btn--disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.jarvis-orb-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 6px;
+}
+
+.jarvis-orb-canvas {
+  display: block;
+  border-radius: 50%;
+}
+
+.jarvis-orb-ring {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  border: 1px dashed color-mix(in srgb, var(--color-accent) 45%, transparent);
+}
+
+.jarvis-orb-ring--outer {
+  inset: -10%;
+  animation: jarvis-orb-spin 18s linear infinite;
+  opacity: 0.5;
+}
+
+.jarvis-orb-ring--inner {
+  inset: 4%;
+  animation: jarvis-orb-spin 12s linear infinite reverse;
+  opacity: 0.35;
+}
+
+.jarvis-orb-btn--recording .jarvis-orb-ring--outer {
+  border-color: color-mix(in srgb, #ff6b4a 65%, var(--color-accent));
+  animation-duration: 6s;
+}
+
+.jarvis-orb-caption {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  text-align: center;
+}
+
+.jarvis-orb-caption__title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-accent);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.jarvis-orb-caption__hint {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+}
+
+.jarvis-orb-float {
+  position: absolute;
+  right: max(1rem, calc((100% - var(--chat-max-width)) / 2 + 1rem));
+  bottom: 7.5rem;
+  z-index: 20;
+  pointer-events: auto;
+  animation: jarvis-orb-float 5s ease-in-out infinite;
+}
+
+@media (max-width: 640px) {
+  .jarvis-orb-float {
+    right: 1rem;
+    bottom: 6.5rem;
+  }
+}

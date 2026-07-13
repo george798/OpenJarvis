@@ -26,6 +26,7 @@ import { SOURCE_CATALOG } from '../types/connectors';
 import type { ConnectRequest } from '../types/connectors';
 import { listConnectors, connectSource, disconnectSource, getSyncStatus, triggerSync } from '../lib/connectors-api';
 import type { SyncStatus } from '../types/connectors';
+import { GoogleOAuthConnectPanel, GOOGLE_OAUTH_CONNECTORS } from '../components/connectors/GoogleOAuthConnectPanel';
 
 // ---------------------------------------------------------------------------
 // Inline connect form (reused from AgentsPage pattern)
@@ -602,10 +603,12 @@ function DataSourcesSection() {
   const [syncStatuses, setSyncStatuses] = useState<Record<string, SyncStatus>>({});
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   const loadConnectors = useCallback(() => {
     listConnectors()
-      .then((list) =>
+      .then((list) => {
+        setLoadError('');
         setCachedConnectors(
           list.map((c) => ({
             connector_id: c.connector_id,
@@ -613,9 +616,14 @@ function DataSourcesSection() {
             connected: c.connected,
             chunks: (c as any).chunks || 0,
           })),
-        ),
-      )
-      .catch(() => {});
+        );
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to load data sources';
+        setLoadError(msg);
+        // Avoid infinite "Loading sources…" when auth fails or the API errors.
+        setCachedConnectors([]);
+      });
   }, [setCachedConnectors]);
 
   const setConnectors = setCachedConnectors;
@@ -753,6 +761,21 @@ function DataSourcesSection() {
   if (isFirstLoad) {
     return (
       <div className="flex flex-col gap-5">
+        {loadError && (
+          <div
+            className="hud-panel"
+            style={{
+              padding: '12px 14px',
+              borderColor: 'color-mix(in srgb, var(--color-error) 35%, transparent)',
+              fontSize: 12,
+              color: 'var(--color-error)',
+            }}
+          >
+            {loadError.includes('401')
+              ? 'Cannot load data sources — set your API key in Settings → Connection, then refresh.'
+              : loadError}
+          </div>
+        )}
         <section>
           <div className="hud-label mb-2" style={{ color: 'var(--color-text-tertiary)' }}>
             Loading sources…
@@ -921,7 +944,19 @@ function DataSourcesSection() {
                         )}
                       </div>
                     ))}
-                    {meta?.inputFields && (
+                    {meta?.inputFields && GOOGLE_OAUTH_CONNECTORS.has(c.connector_id) && (
+                      <GoogleOAuthConnectPanel
+                        connectorId={c.connector_id}
+                        displayName={meta.display_name}
+                        fields={meta.inputFields}
+                        onDone={() => {
+                          setExpandedId(null);
+                          loadConnectors();
+                          loadSyncStatuses();
+                        }}
+                      />
+                    )}
+                    {meta?.inputFields && !GOOGLE_OAUTH_CONNECTORS.has(c.connector_id) && (
                       <InlineConnectForm
                         fields={meta.inputFields}
                         loading={loading && connectingId === c.connector_id}

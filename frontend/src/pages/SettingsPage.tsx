@@ -19,8 +19,11 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useAppStore, type ThemeMode } from '../lib/store';
-import { checkHealth, fetchSpeechHealth, getMemoryStats, getInferenceSource, setInferenceSource, fetchModels, type InferenceSource } from '../lib/api';
+import { checkHealth, fetchSpeechHealth, fetchSpeechVoices, getMemoryStats, getInferenceSource, setInferenceSource, fetchModels, type InferenceSource } from '../lib/api';
+import { probeMicPermission, type MicPermissionState } from '../hooks/useSpeech';
+import { toast } from 'sonner';
 import { isAutoUpdateDisabled, setAutoUpdateDisabled } from '../components/Desktop/UpdateChecker';
+import { GiorgosSettingsSection } from '../components/settings/GiorgosSettingsSection';
 
 function OllamaModelList() {
   const [models, setModels] = useState<Array<{ name: string }>>([]);
@@ -144,6 +147,10 @@ export function SettingsPage() {
   const serverInfo = useAppStore((s) => s.serverInfo);
   const [healthy, setHealthy] = useState<boolean | null>(null);
   const [speechBackendAvailable, setSpeechBackendAvailable] = useState<boolean | null>(null);
+  const [ttsBackendAvailable, setTtsBackendAvailable] = useState<boolean | null>(null);
+  const [ttsVoices, setTtsVoices] = useState<string[]>([]);
+  const [micPermission, setMicPermission] = useState<MicPermissionState>('unknown');
+  const [micTesting, setMicTesting] = useState(false);
   const [saved, setSaved] = useState(false);
 
   const [autoUpdateEnabled, setAutoUpdateEnabled] = useState(() => !isAutoUpdateDisabled());
@@ -216,11 +223,53 @@ export function SettingsPage() {
   useEffect(() => {
     checkHealth().then(setHealthy);
     fetchSpeechHealth()
-      .then((h) => setSpeechBackendAvailable(h.available))
-      .catch(() => setSpeechBackendAvailable(false));
+      .then((h) => {
+        setSpeechBackendAvailable(h.available);
+        setTtsBackendAvailable(Boolean(h.tts_available));
+        if (h.tts_available) {
+          fetchSpeechVoices()
+            .then((v) => setTtsVoices(v.voices))
+            .catch(() => setTtsVoices([]));
+        }
+      })
+      .catch(() => {
+        setSpeechBackendAvailable(false);
+        setTtsBackendAvailable(false);
+      });
     getMemoryStats()
       .then(setMemoryStats)
       .catch(() => setMemoryStats(null));
+    probeMicPermission().then(setMicPermission);
+  }, []);
+
+  const testMicrophone = useCallback(async () => {
+    setMicTesting(true);
+    try {
+      if (!window.isSecureContext) {
+        toast.error('Use http://127.0.0.1:8000 in Chrome or Edge (secure context required)');
+        return;
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        toast.error('Microphone API not available — use Chrome or Edge, not Cursor preview');
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+      setMicPermission('granted');
+      toast.success('Microphone works — orb should turn red when listening');
+    } catch (err) {
+      const msg =
+        err instanceof DOMException && err.name === 'NotAllowedError'
+          ? 'Blocked — reset site permissions (lock icon → Site settings), hard-refresh, try again'
+          : err instanceof Error
+            ? err.message
+            : 'Microphone test failed';
+      setMicPermission('denied');
+      toast.error(msg);
+    } finally {
+      setMicTesting(false);
+      probeMicPermission().then(setMicPermission);
+    }
   }, []);
 
   const showSaved = () => {
@@ -383,6 +432,8 @@ export function SettingsPage() {
               />
             </SettingRow>
           </Section>
+
+          <GiorgosSettingsSection />
 
           {/* Inference source */}
           <Section title="Inference source">
@@ -613,6 +664,30 @@ export function SettingsPage() {
 
           {/* Speech */}
           <Section title="Speech">
+            <SettingRow label="Voice assistant" description="Mic → transcribe → send → spoken reply">
+              <button
+                onClick={() => {
+                  const next = !settings.voiceAssistantEnabled;
+                  updateSettings({
+                    voiceAssistantEnabled: next,
+                    speechEnabled: next ? true : settings.speechEnabled,
+                  });
+                  showSaved();
+                }}
+                className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
+                style={{
+                  background: settings.voiceAssistantEnabled ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                }}
+              >
+                <span
+                  className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform bg-white"
+                  style={{
+                    transform: settings.voiceAssistantEnabled ? 'translateX(20px)' : 'translateX(0)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }}
+                />
+              </button>
+            </SettingRow>
             <SettingRow label="Speech-to-Text" description="Enable microphone input for voice dictation">
               <button
                 onClick={() => { updateSettings({ speechEnabled: !settings.speechEnabled }); showSaved(); }}
@@ -630,7 +705,75 @@ export function SettingsPage() {
                 />
               </button>
             </SettingRow>
-            <SettingRow label="Backend status" description="Requires Whisper, Deepgram, or another speech backend">
+            <SettingRow label="Spoken replies" description="Jarvis voice via server TTS, or browser fallback">
+              <button
+                onClick={() => { updateSettings({ ttsEnabled: !settings.ttsEnabled }); showSaved(); }}
+                className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
+                style={{
+                  background: settings.ttsEnabled ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                }}
+              >
+                <span
+                  className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform bg-white"
+                  style={{
+                    transform: settings.ttsEnabled ? 'translateX(20px)' : 'translateX(0)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }}
+                />
+              </button>
+            </SettingRow>
+            {ttsVoices.length > 0 && (
+              <SettingRow label="Jarvis voice" description="Server TTS voice for spoken replies">
+                <select
+                  value={settings.ttsVoiceId || 'onyx'}
+                  onChange={(e) => { updateSettings({ ttsVoiceId: e.target.value }); showSaved(); }}
+                  className="px-2 py-1 rounded text-xs cursor-pointer"
+                  style={{
+                    background: 'var(--color-bg)',
+                    border: '1px solid var(--color-border)',
+                    color: 'var(--color-text)',
+                  }}
+                >
+                  {ttsVoices.map((v) => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </select>
+              </SettingRow>
+            )}
+            <SettingRow label="Browser microphone" description="Must be Allowed — use Chrome/Edge at 127.0.0.1:8000">
+              <div className="flex items-center gap-2">
+                <span
+                  className="w-2 h-2 rounded-full"
+                  style={{
+                    background: micPermission === 'granted' ? 'var(--color-success)'
+                      : micPermission === 'denied' ? 'var(--color-error)'
+                      : 'var(--color-text-tertiary)',
+                  }}
+                />
+                <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+                  {micPermission === 'granted' ? 'Allowed'
+                    : micPermission === 'denied' ? 'Blocked'
+                    : micPermission === 'prompt' ? 'Not asked yet'
+                    : micPermission === 'unsupported' ? 'Unsupported browser'
+                    : 'Unknown'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { void testMicrophone(); }}
+                  disabled={micTesting}
+                  className="px-2 py-1 rounded text-xs cursor-pointer"
+                  style={{
+                    background: 'var(--color-bg-tertiary)',
+                    border: '1px solid var(--color-border)',
+                    color: 'var(--color-text)',
+                    opacity: micTesting ? 0.6 : 1,
+                  }}
+                >
+                  {micTesting ? 'Testing…' : 'Test mic'}
+                </button>
+              </div>
+            </SettingRow>
+            <SettingRow label="STT backend" description="Local Whisper in Docker (faster-whisper)">
               <div className="flex items-center gap-2">
                 <span
                   className="w-2 h-2 rounded-full"
@@ -647,10 +790,31 @@ export function SettingsPage() {
                 </span>
               </div>
             </SettingRow>
+            <SettingRow label="TTS backend" description="OpenAI server voice or browser fallback">
+              <div className="flex items-center gap-2">
+                <span
+                  className="w-2 h-2 rounded-full"
+                  style={{
+                    background: ttsBackendAvailable === true ? 'var(--color-success)'
+                      : ttsBackendAvailable === false ? 'var(--color-text-tertiary)'
+                      : 'var(--color-text-tertiary)',
+                  }}
+                />
+                <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+                  {ttsBackendAvailable === null ? 'Checking...'
+                    : ttsBackendAvailable ? 'Server TTS ready'
+                    : 'Browser TTS only'}
+                </span>
+              </div>
+            </SettingRow>
             {!speechBackendAvailable && speechBackendAvailable !== null && (
               <div className="text-xs mt-2 px-1" style={{ color: 'var(--color-text-tertiary)' }}>
-                Set up a speech backend to use voice input.
-                See the <a href="https://open-jarvis.github.io/OpenJarvis/user-guide/tools/" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-accent)' }}>documentation</a> for details.
+                Install the speech backend in the container (faster-whisper) or set OPENAI_API_KEY / DEEPGRAM_API_KEY for cloud STT.
+              </div>
+            )}
+            {!ttsBackendAvailable && ttsBackendAvailable !== null && (
+              <div className="text-xs mt-2 px-1" style={{ color: 'var(--color-text-tertiary)' }}>
+                Add FISH_API_KEY and speech.tts_voice_id (fish.audio model id) in config, or OPENAI_API_KEY for OpenAI TTS fallback.
               </div>
             )}
           </Section>

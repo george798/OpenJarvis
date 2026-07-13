@@ -110,6 +110,12 @@ class SkillManageTool(BaseTool):
         skills = []
         for f in sorted(self._skills_dir.glob("*.toml")):
             skills.append(f.stem)
+        for d in sorted(self._skills_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            if (d / "skill.toml").exists() or (d / "SKILL.md").exists():
+                if d.name not in skills:
+                    skills.append(d.name)
         if not skills:
             return ToolResult(
                 tool_name=self.spec.name,
@@ -124,16 +130,46 @@ class SkillManageTool(BaseTool):
 
     def _load(self, name: str) -> ToolResult:
         path = self._skills_dir / f"{name}.toml"
-        if not path.exists():
+        if path.exists():
             return ToolResult(
                 tool_name=self.spec.name,
-                success=False,
-                content=f"Skill not found: {name}",
+                success=True,
+                content=path.read_text(),
             )
+        dir_path = self._skills_dir / name
+        if dir_path.is_dir():
+            try:
+                from openjarvis.skills.loader import load_skill_directory
+
+                manifest = load_skill_directory(dir_path)
+                parts = [
+                    f"# Skill: {manifest.name}",
+                    manifest.description,
+                    "",
+                ]
+                if manifest.markdown_content:
+                    parts.append(manifest.markdown_content)
+                if manifest.steps:
+                    parts.append("\n## Steps")
+                    for i, step in enumerate(manifest.steps, 1):
+                        parts.append(
+                            f"{i}. {step.tool_name} — {step.arguments_template}"
+                        )
+                return ToolResult(
+                    tool_name=self.spec.name,
+                    success=True,
+                    content="\n".join(parts),
+                )
+            except Exception as exc:
+                return ToolResult(
+                    tool_name=self.spec.name,
+                    success=False,
+                    content=f"Failed to load skill directory {name}: {exc}",
+                )
         return ToolResult(
             tool_name=self.spec.name,
-            success=True,
-            content=path.read_text(),
+            success=False,
+            content=f"Skill not found: {name}",
         )
 
     def _delete(self, name: str) -> ToolResult:

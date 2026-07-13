@@ -298,6 +298,11 @@ class SystemBuilder:
         system._learning_orchestrator = learning_orchestrator
         system._skill_few_shot_examples = skill_few_shot_examples
         system._mcp_clients = list(getattr(self, "_mcp_clients", []))
+        if task_scheduler is not None:
+            task_scheduler._system = system
+            task_scheduler.set_delivery(config=config)
+            if config.scheduler.enabled:
+                task_scheduler.start()
         if system.agent_executor is not None:
             system.agent_executor.set_system(system)
         return system
@@ -440,6 +445,14 @@ class SystemBuilder:
         elif name.startswith("channel_"):
             if hasattr(tool, "_channel"):
                 tool._channel = channel_backend
+        elif name in ("knowledge_search", "knowledge_sql", "scan_chunks"):
+            if hasattr(tool, "_store") and tool._store is None:
+                try:
+                    from openjarvis.connectors.store import KnowledgeStore
+
+                    tool._store = KnowledgeStore()
+                except Exception as exc:
+                    logger.warning("Failed to wire KnowledgeStore for %s: %s", name, exc)
         elif name in (
             "schedule_task",
             "list_scheduled_tasks",
@@ -494,6 +507,7 @@ class SystemBuilder:
                 store,
                 poll_interval=config.scheduler.poll_interval,
                 bus=bus,
+                config=config,
             )
             return store, sched
         except Exception as exc:
@@ -587,11 +601,18 @@ class SystemBuilder:
         # Bearer token from config — needed by authenticated MCP servers
         # like Home Assistant. None / empty string skips the header. #461.
         token = cfg.get("token")
+        from openjarvis.mcp.loader import _resolve_headers
+
+        headers = _resolve_headers(cfg.get("headers"))
         command = cfg.get("command", "")
         args = cfg.get("args", [])
 
         if url:
-            transport = StreamableHTTPTransport(url=url, token=token)
+            transport = StreamableHTTPTransport(
+                url=url,
+                token=token,
+                headers=headers or None,
+            )
         elif command:
             transport = StdioTransport(command=[command] + args)
         else:

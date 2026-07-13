@@ -27,6 +27,65 @@ from openjarvis.server.models import (
 router = APIRouter()
 
 
+def _backend_engine_id(engine) -> str:
+    """Return the leaf ``engine_id``, unwrapping telemetry/guardrail wrappers."""
+    inner = getattr(engine, "_inner", None) or getattr(engine, "_engine", None)
+    if inner is not None:
+        return _backend_engine_id(inner)
+    return getattr(engine, "engine_id", "") or ""
+
+
+def _model_engine_id(engine, model: str) -> str:
+    """Return the ``engine_id`` of the backend that serves *model*."""
+    try:
+        from openjarvis.engine.multi import MultiEngine
+
+        inner = getattr(engine, "_inner", engine)
+        if isinstance(inner, MultiEngine):
+            routed = inner._engine_for(model)
+            if routed is not None:
+                return _backend_engine_id(routed)
+    except Exception:
+        pass
+    return _backend_engine_id(getattr(engine, "_inner", engine))
+
+
+def _model_bypasses_agent_stream(engine, model: str) -> bool:
+    """True when the agent+tools loop should not handle streaming chat.
+
+    The Cursor OpenAI proxy (``lmstudio`` engine) returns empty non-stream
+    completions when the orchestrator attaches its full tool schema (~9k
+    tokens).  Direct ``engine.stream()`` works (or surfaces proxy errors
+    like ``resource_exhausted``) instead of leaving the UI with zero content.
+
+    When ``[agent] dual_model_routing`` is enabled, tool-like requests still
+    use the local ``tool_model`` agent loop even if the UI selected a proxy
+    model.  Force the agent path with ``X-OpenJarvis-Agent-Stream: 1`` or
+    disable dual routing in config.
+    """
+    return _model_engine_id(engine, model) == "lmstudio"
+
+
+def _last_user_text(request_body: ChatCompletionRequest) -> str:
+    for m in reversed(request_body.messages or []):
+        if m.role == "user" and m.content:
+            return m.content
+    return ""
+
+
+def _resolve_routing(request: Request, engine, model: str, request_body):
+    from openjarvis.server.dual_model_routing import resolve_chat_routing
+
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        from openjarvis.core.config import load_config
+
+        config = load_config()
+    return resolve_chat_routing(
+        config, engine, model, _last_user_text(request_body)
+    )
+
+
 def _to_messages(chat_messages) -> list[Message]:
     """Convert Pydantic ChatMessage objects to core Message objects."""
     messages = []
@@ -49,6 +108,10 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     engine = request.app.state.engine
     agent = getattr(request.app.state, "agent", None)
     model = request_body.model
+
+    # Active skill is merged into the agent system prompt via AgentContext
+    # metadata (see stream_bridge / _handle_agent). request_body.skill is
+    # passed through on every chat completion from the web UI skills picker.
 
     # Inject memory context into messages before dispatching
     config = getattr(request.app.state, "config", None)
@@ -151,9 +214,58 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
             return await _handle_stream_tools(
                 engine, model, request_body, complexity_info
             )
+
+        # Plain chat (no client tools): route through the agent so the
+        # orchestrator's tool loop (web_search, browser_*, memory, ...)
+        # actually runs and the UI receives agent_turn_start /
+        # tool_call_start / tool_call_end SSE events. Without this the
+        # streaming path bypassed the agent entirely, so the model could
+        # only *describe* browsing/searching without ever calling a tool.
+        # Opt out with `X-OpenJarvis-Agent-Stream: 0` to debug the raw
+        # engine stream. The client-supplied `tools` path above is
+        # untouched (preserves the #414/#454 fix for API callers).
+        bus = getattr(request.app.state, "bus", None)
+        agent_stream_optout = (
+            request.headers.get("x-openjarvis-agent-stream", "")
+            .strip()
+            .lower()
+            in {"0", "false", "off", "no"}
+        )
+        agent_stream_force = (
+            request.headers.get("x-openjarvis-agent-stream", "")
+            .strip()
+            .lower()
+            in {"1", "true", "on", "yes"}
+        )
+        routing = _resolve_routing(request, engine, model, request_body)
+        if agent_stream_force:
+            routing = type(routing)(
+                use_agent=True,
+                stream_model=routing.stream_model,
+                agent_model=routing.agent_model,
+                polish_model=routing.polish_model,
+            )
+        use_agent_stream = (
+            agent is not None
+            and bus is not None
+            and not agent_stream_optout
+            and routing.use_agent
+        )
+        if use_agent_stream:
+            from openjarvis.server.stream_bridge import create_agent_stream
+
+            return await create_agent_stream(
+                agent,
+                bus,
+                routing.stream_model,
+                request_body,
+                agent_model=routing.agent_model,
+                polish_model=routing.polish_model,
+            )
+
         return await _handle_stream(
             engine,
-            model,
+            routing.stream_model,
             request_body,
             complexity_info,
             trace_store=getattr(request.app.state, "trace_store", None),
@@ -176,19 +288,37 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     # the agent to execute them), add an explicit opt-in header rather
     # than removing this guard — silent re-routing is what produced #414.
     if agent is not None and not request_body.tools:
-        return _handle_agent(
-            agent,
-            model,
-            request_body,
-            complexity_info,
-            trace_store=getattr(request.app.state, "trace_store", None),
-            bus=getattr(request.app.state, "bus", None),
+        agent_stream_force = (
+            request.headers.get("x-openjarvis-agent-stream", "")
+            .strip()
+            .lower()
+            in {"1", "true", "on", "yes"}
         )
+        routing = _resolve_routing(request, engine, model, request_body)
+        if agent_stream_force:
+            routing = type(routing)(
+                use_agent=True,
+                stream_model=routing.stream_model,
+                agent_model=routing.agent_model,
+                polish_model=routing.polish_model,
+            )
+        if routing.use_agent:
+            return _handle_agent(
+                agent,
+                routing.agent_model,
+                request_body,
+                complexity_info,
+                trace_store=getattr(request.app.state, "trace_store", None),
+                bus=getattr(request.app.state, "bus", None),
+                display_model=routing.stream_model,
+                polish_model=routing.polish_model,
+            )
 
     bus = getattr(request.app.state, "bus", None)
+    routing = _resolve_routing(request, engine, model, request_body)
     return _handle_direct(
         engine,
-        model,
+        routing.stream_model,
         request_body,
         bus=bus,
         complexity_info=complexity_info,
@@ -304,6 +434,8 @@ def _handle_agent(
     *,
     trace_store=None,
     bus=None,
+    display_model: str = "",
+    polish_model: str | None = None,
 ) -> ChatCompletionResponse:
     """Run through agent.
 
@@ -315,9 +447,19 @@ def _handle_agent(
     (``check_readiness``, min 20 traces) could never open.
     """
     from openjarvis.agents._stubs import AgentContext
+    from openjarvis.core.types import Message, Role
 
     # Build context from prior messages
     ctx = AgentContext()
+    if getattr(req, "skill", None):
+        try:
+            from openjarvis.core.config import load_config
+            from openjarvis.skills.context import apply_active_skill_to_context
+
+            cfg = load_config()
+            apply_active_skill_to_context(ctx, req.skill, cfg)
+        except Exception:
+            pass
     if len(req.messages) > 1:
         prior = _to_messages(req.messages[:-1])
         for m in prior:
@@ -341,6 +483,45 @@ def _handle_agent(
     finally:
         agent._model = original_model
 
+    content = result.content or ""
+    if polish_model and result.tool_results:
+        engine = getattr(agent, "_engine", None)
+        if engine is not None:
+            tool_summary = "\n".join(
+                f"- {tr.tool_name}: {str(tr.content)[:2000]}"
+                for tr in result.tool_results
+            )
+            polish_messages = [
+                Message(
+                    role=Role.SYSTEM,
+                    content=(
+                        "You are Jarvis, a concise personal assistant. "
+                        "Summarize the tool results for the user in plain English. "
+                        "Do not mention tools or JSON."
+                    ),
+                ),
+                Message(
+                    role=Role.USER,
+                    content=(
+                        f"User request: {input_text}\n\n"
+                        f"Tool results:\n{tool_summary}\n\n"
+                        f"Draft answer:\n{content or '(none)'}"
+                    ),
+                ),
+            ]
+            try:
+                polished = engine.generate(
+                    polish_messages,
+                    model=polish_model,
+                    temperature=min(req.temperature, 0.5),
+                    max_tokens=req.max_tokens,
+                )
+                content = polished.get("content") or content
+            except Exception as exc:
+                logging.getLogger("openjarvis.server").warning(
+                    "Response polish with %s failed: %s", polish_model, exc
+                )
+
     usage = UsageInfo(
         prompt_tokens=result.metadata.get("prompt_tokens", 0),
         completion_tokens=result.metadata.get("completion_tokens", 0),
@@ -358,13 +539,14 @@ def _handle_agent(
         if Path(audio_path).exists():
             audio_meta = AudioMeta(url="/api/digest/audio")
 
+    response_model = display_model or model
     return ChatCompletionResponse(
-        model=model,
+        model=response_model,
         choices=[
             Choice(
                 message=ChoiceMessage(
                     role="assistant",
-                    content=result.content,
+                    content=content,
                     audio=audio_meta,
                 ),
                 finish_reason="stop",
@@ -841,6 +1023,15 @@ async def reload_cloud_engine(request: Request):
         else:
             request.app.state.engine = new_multi
         request.app.state.engine_name = "multi"
+
+    try:
+        from openjarvis.core.config import load_config
+        from openjarvis.speech._tts_discovery import get_tts_backend
+
+        cfg = getattr(request.app.state, "config", None) or load_config()
+        request.app.state.tts_backend = get_tts_backend(cfg)
+    except Exception:
+        pass
 
     return {"status": "ok", "message": "Cloud engine reloaded"}
 

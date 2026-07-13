@@ -79,6 +79,14 @@ class TestAuthMiddleware:
         )
         assert resp.status_code == 200
 
+    def test_accepts_token_query_param(self, client):
+        resp = client.get("/v1/models?token=oj_sk_test123")
+        assert resp.status_code == 200
+
+    def test_oauth_callback_exempt(self, client):
+        resp = client.get("/v1/connectors/gcalendar/oauth/callback")
+        assert resp.status_code != 401
+
     def test_no_key_configured_allows_all(self):
         client = TestClient(_make_app(""))
         resp = client.get("/v1/models")

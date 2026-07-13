@@ -52,7 +52,8 @@ def _run_research(
     from rich.markdown import Markdown
     from rich.theme import Theme
 
-    from openjarvis.agents.research_loop import DEFAULT_PLANNER_MODEL, ResearchAgent
+    from openjarvis.agents.research_loop import ResearchAgent, resolve_planner_model
+    from openjarvis.core.config import load_config
     from openjarvis.connectors.embeddings import OllamaEmbedder
     from openjarvis.connectors.hybrid_search import HybridSearch
     from openjarvis.connectors.store import KnowledgeStore
@@ -63,13 +64,13 @@ def _run_research(
         store_kwargs["db_path"] = knowledge_db
     store = KnowledgeStore(**store_kwargs)
 
-    # Research mode is wired specifically to Ollama: the planner prompt
-    # (gemma4:31b) and the function-call schema for search/clarify both
-    # assume Ollama's /api/chat tool semantics. Using the engine returned
-    # by get_engine() here is a foot-gun — discovery can pick any
-    # OpenAI-compatible engine registered on the same port as our own
-    # API server. research_router.py hardcodes OllamaEngine() for the
-    # same reason; mirror that here so CLI and HTTP behave identically.
+    # Research mode is wired specifically to Ollama: the planner prompt and
+    # function-call schema for search/clarify assume Ollama's /api/chat tool
+    # semantics. Using the engine returned by get_engine() here is a foot-gun
+    # — discovery can pick any OpenAI-compatible engine registered on the
+    # same port as our own API server. research_router.py hardcodes
+    # OllamaEngine() for the same reason; mirror that here so CLI and HTTP
+    # behave identically.
     engine = OllamaEngine()
 
     chunk_count = store._conn.execute(
@@ -93,7 +94,7 @@ def _run_research(
         )
         embedder = None
 
-    planner_model = model_name or DEFAULT_PLANNER_MODEL
+    planner_model = resolve_planner_model(model_name, load_config())
     logger.debug("research: planner_model=%s", planner_model)
 
     # ---- Output styling --------------------------------------------------

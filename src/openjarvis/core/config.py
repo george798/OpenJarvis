@@ -945,6 +945,10 @@ class AgentConfig:
     system_prompt: str = ""  # inline system prompt (takes precedence if set)
     system_prompt_path: str = ""  # path to system prompt file (.txt, .md)
     context_from_memory: bool = True  # inject relevant memory context into prompts
+    research_model: str = ""  # Ollama model for Deep Research (tool-calling planner)
+    tool_model: str = ""  # Local model for tool loop when UI selects Cursor/fast proxy
+    response_model: str = ""  # Optional fast model to polish answers after tools
+    dual_model_routing: bool = True  # Cursor chat + Ollama tools when proxy model selected
     default_system_prompt: str = (
         "You are a helpful AI assistant running locally on the user's own "
         "hardware through OpenJarvis. You are not a cloud service. Respond "
@@ -1347,6 +1351,24 @@ class SchedulerConfig:
     enabled: bool = False
     poll_interval: int = 60
     db_path: str = ""  # Defaults to ~/.openjarvis/scheduler.db
+    delivery_enabled: bool = True
+    default_delivery_channel: str = ""
+    default_delivery_recipient: str = ""
+
+
+@dataclass(slots=True)
+class ToolsetsConfig:
+    """Per-platform tool allowlists (Hermes ``hermes tools`` parity)."""
+
+    enabled: bool = True
+    cli: str = "*"  # * = all configured agent tools
+    web: str = ""
+    telegram: str = ""
+    discord: str = ""
+    slack: str = ""
+    whatsapp: str = ""
+    cron: str = ""
+    channel: str = ""
 
 
 @dataclass(slots=True)
@@ -1389,13 +1411,20 @@ class OperatorsConfig:
 
 @dataclass(slots=True)
 class SpeechConfig:
-    """Speech-to-text settings."""
+    """Speech-to-text and text-to-speech settings."""
 
     backend: str = "auto"  # "auto", "faster-whisper", "openai", "deepgram"
     model: str = "base"  # Whisper model size: tiny, base, small, medium, large-v3
-    language: str = ""  # Empty = auto-detect
+    language: str = ""  # Empty = auto-detect; set "en", "el", etc. for better accuracy
     device: str = "auto"  # "auto", "cpu", "cuda"
     compute_type: str = "float16"  # "float16", "int8", "float32"
+    beam_size: int = 5
+    vad_filter: bool = True
+    initial_prompt: str = ""  # Hints vocabulary/context for short voice commands
+    tts_backend: str = "auto"  # auto, fish_audio, openai_tts, cartesia, kokoro
+    tts_model: str = "tts-1"
+    tts_voice_id: str = ""
+    tts_speed: float = 1.0
 
 
 @dataclass(slots=True)
@@ -1429,6 +1458,12 @@ class MemoryFilesConfig:
     user_path: str = "~/.openjarvis/USER.md"
     nudge_interval: int = 10
     persona_name: str = ""  # named persona dir under ~/.openjarvis/personas/<name>/
+    # Obsidian / markdown vault used as compounding long-term memory. When set,
+    # the vault is auto-connected + indexed at server start, and the write-back
+    # loop appends session journals so every new chat starts smarter.
+    vault_path: str = ""
+    vault_writeback: bool = True
+    vault_writeback_interval: int = 3600  # seconds between journal flushes
 
 
 @dataclass(slots=True)
@@ -1471,6 +1506,11 @@ class SkillsConfig:
     active: str = "*"
     auto_discover: bool = True
     auto_sync: bool = False
+    # Hermes-style outbound learning loop: after a successful multi-step
+    # task, distill it into a reusable skill automatically.
+    learn_from_tasks: bool = True
+    # Minimum successful tool calls in a task before it is worth learning.
+    learn_min_tool_calls: int = 3
     nudge_interval: int = 15
     index_repo: str = "https://github.com/openjarvis/skill-index.git"
     index_dir: str = "~/.openjarvis/skill-index/"
@@ -1555,6 +1595,7 @@ class JarvisConfig:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     digest: DigestConfig = field(default_factory=DigestConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    toolsets: ToolsetsConfig = field(default_factory=ToolsetsConfig)
     mining: Optional["MiningConfig"] = None
 
     @property
@@ -1816,6 +1857,7 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
             "system_prompt",
             "compression",
             "skills",
+            "toolsets",
         )
         for section_name in top_sections:
             if section_name in data:
@@ -1823,6 +1865,22 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
                     getattr(cfg, section_name),
                     data[section_name],
                 )
+
+        # [[skills.sources]] array-of-tables → SkillSourceConfig list
+        skills_data = data.get("skills")
+        if isinstance(skills_data, dict) and "sources" in skills_data:
+            raw_sources = skills_data["sources"]
+            if isinstance(raw_sources, list):
+                cfg.skills.sources = [
+                    SkillSourceConfig(
+                        source=str(s.get("source", "")),
+                        url=str(s.get("url", "")),
+                        filter=dict(s.get("filter") or {}),
+                        auto_update=bool(s.get("auto_update", False)),
+                    )
+                    for s in raw_sources
+                    if isinstance(s, dict)
+                ]
 
         # Memory: accept [memory] (old) → maps to tools.storage
         if "memory" in data:

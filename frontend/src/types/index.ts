@@ -136,6 +136,18 @@ export interface Conversation {
   updatedAt: number;
   model: string;
   messages: ChatMessage[];
+  activeSkill?: string | null;
+}
+
+export interface SkillInfo {
+  name: string;
+  description: string;
+  version?: string;
+  author?: string;
+}
+
+export interface SkillDetail extends SkillInfo {
+  content: string;
 }
 
 export interface ConversationStore {

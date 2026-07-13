@@ -24,6 +24,78 @@ from openjarvis.intelligence import (
 logger = logging.getLogger(__name__)
 
 
+def _platform_status_prompt() -> str:
+    """Dynamic system-prompt suffix: stored credentials + MCP servers.
+
+    Prevents the model from asking the user to paste API keys that are
+    already in the encrypted vault, and reminds it what MCP integrations
+    are configured.
+    """
+    lines: list[str] = ["## Platform status (live — do not ask user to re-paste these)"]
+
+    try:
+        from openjarvis.core import secret_vault as vault
+
+        data = vault.load_vault()
+        if data:
+            lines.append(
+                "Stored credentials (encrypted vault — use credential_manage get/list; "
+                "never ask the user to paste these again):"
+            )
+            seen_vars: set[str] = set()
+            for key in sorted(data.keys()):
+                var = vault.env_var_name(key)
+                if var in seen_vars:
+                    continue
+                seen_vars.add(var)
+                val = data[key]
+                masked = val[:4] + "…" + val[-4:] if len(val) > 8 else "****"
+                lines.append(f"- ${var} ({key}: {masked})")
+        else:
+            lines.append("Encrypted credential vault: empty.")
+    except Exception:
+        lines.append("Encrypted credential vault: unavailable.")
+
+    try:
+        import json
+        import tomllib
+        from pathlib import Path
+
+        from openjarvis.core.config import DEFAULT_CONFIG_PATH
+
+        cfg_path = Path(
+            __import__("os").environ.get("OPENJARVIS_CONFIG", DEFAULT_CONFIG_PATH)
+        ).expanduser()
+        if cfg_path.exists():
+            mcp = tomllib.loads(cfg_path.read_bytes()).get("tools", {}).get("mcp", {})
+            raw = mcp.get("servers", "[]")
+            servers = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(servers, list) and servers:
+                lines.append("Configured MCP servers (use mcp_manage list/test):")
+                for s in servers:
+                    if not isinstance(s, dict):
+                        continue
+                    name = s.get("name", "?")
+                    kind = "http" if s.get("url") else "stdio"
+                    lines.append(f"- {name} ({kind})")
+                if any(
+                    isinstance(s, dict) and "composio" in str(s.get("name", "")).lower()
+                    for s in servers
+                ):
+                    lines.append(
+                        "Composio is wired (e.g. composio-reddit). Use COMPOSIO_SEARCH_TOOLS "
+                        "and COMPOSIO_MULTI_EXECUTE_TOOL — do NOT ask for COMPOSIO_API_KEY."
+                    )
+    except Exception:
+        pass
+
+    lines.append(
+        "Before asking the user for any API key, call credential_manage action=list. "
+        "If the key is already stored, use the $ENV_VAR reference instead."
+    )
+    return "\n".join(lines)
+
+
 def _unique_model_ids(model_ids: list[str]) -> list[str]:
     """Return model ids in first-seen order without duplicates."""
     unique: list[str] = []
@@ -122,6 +194,21 @@ def serve(
         sys.exit(1)
 
     config = load_config()
+
+    from openjarvis.server.cloud_router import apply_cloud_keys_to_environ
+
+    apply_cloud_keys_to_environ()
+
+    # Export encrypted vault secrets (credential_manage tool / `jarvis vault`)
+    # as env vars so tools can reference them via $VAR across restarts.
+    try:
+        from openjarvis.core.secret_vault import inject_vault_into_environ
+
+        _n_secrets = inject_vault_into_environ()
+        if _n_secrets:
+            console.print(f"  Vault:  [cyan]{_n_secrets} secret(s) loaded[/cyan]")
+    except Exception as exc:
+        logger.debug("Vault secret injection failed: %s", exc)
 
     # Resolve host/port from CLI args or config
     bind_host = host or config.server.host
@@ -324,11 +411,22 @@ def serve(
 
                     # MCP server tools from config.tools.mcp.servers
                     # (#461 — these were silently dropped).
+                    # When agent.tools contains mcp:* or *, load every tool
+                    # discovered from configured MCP servers (per-server
+                    # include_tools / exclude_tools still apply). Otherwise
+                    # only MCP tools explicitly named in agent.tools load —
+                    # which breaks Composio/Reddit with dozens of dynamic tools.
                     from openjarvis.mcp.loader import load_mcp_tools_from_config
+
+                    mcp_allowed: set[str] | None
+                    if not configured or "mcp:*" in allowed or "*" in allowed:
+                        mcp_allowed = None
+                    else:
+                        mcp_allowed = allowed
 
                     mcp_tools, mcp_clients = load_mcp_tools_from_config(
                         config.tools.mcp,
-                        allowed_names=allowed if configured else None,
+                        allowed_names=mcp_allowed,
                     )
                     if mcp_tools:
                         existing = {t.spec.name for t in tools}
@@ -344,6 +442,53 @@ def serve(
 
                 if getattr(agent_cls, "accepts_tools", False):
                     agent_kwargs["max_turns"] = config.agent.max_turns
+
+                # Persona / central-knowledge injection: give the web agent
+                # the same SOUL.md / MEMORY.md / USER.md prompt assembly as
+                # `jarvis ask` (#376), so every chat starts with identity,
+                # curated memory, and the user profile instead of cold.
+                import inspect as _inspect
+
+                if "prompt_builder" in _inspect.signature(
+                    agent_cls.__init__
+                ).parameters:
+                    from openjarvis.prompt.builder import SystemPromptBuilder
+
+                    class _FreshSystemPromptBuilder(SystemPromptBuilder):
+                        """Re-reads persona files on every build.
+
+                        MEMORY.md / USER.md grow at runtime (memory_manage,
+                        vault write-back); the base builder freezes them at
+                        first build for the whole server lifetime. When the
+                        files are unchanged the rebuilt prompt is
+                        byte-identical, so engine prompt caching still works.
+                        """
+
+                        def build(self) -> str:
+                            self._frozen_prefix = None
+                            self._frozen_sections = None
+                            base = super().build()
+                            status = _platform_status_prompt()
+                            if status:
+                                return base + "\n\n" + status
+                            return base
+
+                    agent_kwargs["prompt_builder"] = _FreshSystemPromptBuilder(
+                        agent_template=config.agent.default_system_prompt or "",
+                        memory_files_config=config.memory_files,
+                        system_prompt_config=config.system_prompt,
+                    )
+
+                # Auto-approve tools that set requires_confirmation=True
+                # (shell_exec, apply_patch, git_commit). Without a confirm
+                # callback the web ToolExecutor refuses them outright. This is a
+                # single-user local machine and the user explicitly wants Jarvis
+                # to run commands and edit his own code without a TTY prompt.
+                if "confirm_callback" in _inspect.signature(
+                    agent_cls.__init__
+                ).parameters:
+                    agent_kwargs["interactive"] = True
+                    agent_kwargs["confirm_callback"] = lambda _prompt: True
 
                 agent = agent_cls(engine, model_name, **agent_kwargs)
                 # Pin MCP transports to the agent's lifetime so HTTP
@@ -376,6 +521,7 @@ def serve(
             channel_bridge = None
 
     # Wire channel messages → agent / engine (per-chat session isolation)
+    _wire_system = None
     if channel_bridge is not None:
         from openjarvis.system import JarvisSystem
 
@@ -430,9 +576,15 @@ def serve(
                             load_mcp_tools_from_config,
                         )
 
+                        _ch_mcp_allowed: set[str] | None
+                        if not configured or "mcp:*" in _allowed or "*" in _allowed:
+                            _ch_mcp_allowed = None
+                        else:
+                            _ch_mcp_allowed = _allowed
+
                         _ch_mcp_tools, _ch_mcp_clients = load_mcp_tools_from_config(
                             config.tools.mcp,
-                            allowed_names=_allowed if configured else None,
+                            allowed_names=_ch_mcp_allowed,
                         )
                         if _ch_mcp_tools:
                             _existing = {t.spec.name for t in _channel_tools}
@@ -460,14 +612,19 @@ def serve(
         )
         _wire_system.wire_channel(channel_bridge)
 
-    # Set up speech backend
+    # Set up speech backends (STT + TTS)
     speech_backend = None
+    tts_backend = None
     try:
         from openjarvis.speech._discovery import get_speech_backend
+        from openjarvis.speech._tts_discovery import get_tts_backend
 
         speech_backend = get_speech_backend(config)
         if speech_backend:
-            console.print(f"  Speech: [cyan]{speech_backend.backend_id}[/cyan]")
+            console.print(f"  Speech STT: [cyan]{speech_backend.backend_id}[/cyan]")
+        tts_backend = get_tts_backend(config)
+        if tts_backend:
+            console.print(f"  Speech TTS: [cyan]{tts_backend.backend_id}[/cyan]")
     except Exception as exc:
         logger.debug("Speech backend discovery failed: %s", exc)
 
@@ -512,6 +669,10 @@ def serve(
 
     # Set up agent scheduler for cron/interval agents
     agent_scheduler = None
+    # JarvisSystem reused by the TaskScheduler (below) to execute scheduled
+    # prompts, captured here so the task scheduler does not trigger a second
+    # full SystemBuilder.build().
+    _sched_system = None
     if agent_manager is not None:
         try:
             from openjarvis.agents.executor import AgentExecutor
@@ -581,6 +742,7 @@ def serve(
                 agent_executor=executor,
             )
             executor.set_system(system)
+            _sched_system = system
 
             agent_scheduler = AgentScheduler(
                 manager=agent_manager,
@@ -598,6 +760,44 @@ def serve(
             console.print("  Scheduler: [cyan]active[/cyan]")
         except Exception as exc:
             logger.debug("Agent scheduler init failed: %s", exc)
+
+    # Set up the TaskScheduler backing the schedule_task / list_scheduled_tasks
+    # tools (Hermes-style "schedule this for me"). The orchestrator's tool
+    # instances default to `_scheduler = None` and otherwise report
+    # "Scheduler not available", so we build the scheduler here, inject it into
+    # those tool instances, and start the polling daemon. Task execution reuses
+    # the JarvisSystem built for the agent scheduler when available.
+    task_scheduler = None
+    if config.scheduler.enabled:
+        try:
+            from openjarvis.scheduler.scheduler import TaskScheduler
+            from openjarvis.scheduler.store import SchedulerStore
+
+            _task_sched_db = config.scheduler.db_path
+            if not _task_sched_db:
+                from openjarvis.core.config import DEFAULT_CONFIG_DIR
+
+                _task_sched_db = str(DEFAULT_CONFIG_DIR / "scheduler.db")
+            _task_sched_store = SchedulerStore(db_path=_task_sched_db)
+            task_scheduler = TaskScheduler(
+                _task_sched_store,
+                system=_sched_system,
+                poll_interval=config.scheduler.poll_interval,
+                bus=bus,
+                config=config,
+                channel_bridge=channel_bridge,
+            )
+            # Inject the scheduler into the orchestrator's scheduler tools so
+            # schedule_task / list_scheduled_tasks / ... actually work instead
+            # of returning "Scheduler not available".
+            for _tool in resolved_tools or []:
+                if hasattr(_tool, "_scheduler"):
+                    _tool._scheduler = task_scheduler
+            task_scheduler.start()
+            console.print("  Tasks:     [cyan]scheduler active[/cyan]")
+        except Exception as exc:
+            logger.debug("Task scheduler init failed: %s", exc)
+            task_scheduler = None
 
     # --- Channel Gateway: API key, sessions, ChannelBridge ---
     import os as _os
@@ -656,7 +856,7 @@ def serve(
                 channels=channels,
                 session_store=session_store,
                 bus=bus,
-                system=None,
+                system=_wire_system,
                 agent_manager=agent_manager,
             )
         except Exception as exc:
@@ -673,12 +873,38 @@ def serve(
         config=config,
         memory_backend=memory_backend,
         speech_backend=speech_backend,
+        tts_backend=tts_backend,
         agent_manager=agent_manager,
         agent_scheduler=agent_scheduler,
         api_key=api_key,
         webhook_config=webhook_config,
         cors_origins=config.server.cors_origins,
     )
+
+    # Expose the TaskScheduler so the delivery-wiring block below (and any
+    # routes) can reach it. create_app takes no scheduler argument, so it is
+    # attached to app.state here.
+    app.state.scheduler = task_scheduler
+
+    # Hermes-parity bootstrap: skill sync, memory files
+    try:
+        from openjarvis.hermes.startup import run_hermes_startup
+
+        _boot = run_hermes_startup(config)
+        if _boot.get("skills"):
+            console.print(
+                f"  Hermes skills: [cyan]{_boot['skills']}[/cyan]"
+            )
+    except Exception as exc:
+        logger.debug("Hermes startup skipped: %s", exc)
+
+    # Wire scheduler delivery to channel bridge when both exist
+    try:
+        sched = getattr(app.state, "scheduler", None)
+        if sched is not None and channel_bridge is not None:
+            sched.set_delivery(config=config, channel_bridge=channel_bridge)
+    except Exception as exc:
+        logger.debug("Scheduler delivery wiring skipped: %s", exc)
 
     console.print(
         f"[green]Starting OpenJarvis API server[/green]\n"

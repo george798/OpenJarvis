@@ -60,8 +60,18 @@ class KnowledgeSQLTool(BaseTool):
             category="knowledge",
         )
 
+    def _get_store(self) -> Optional[KnowledgeStore]:
+        if self._store is not None:
+            return self._store
+        try:
+            self._store = KnowledgeStore()
+            return self._store
+        except Exception:
+            return None
+
     def execute(self, **params: Any) -> ToolResult:
-        if self._store is None:
+        store = self._get_store()
+        if store is None:
             return ToolResult(
                 tool_name="knowledge_sql",
                 content="No knowledge store configured.",
@@ -97,7 +107,7 @@ class KnowledgeSQLTool(BaseTool):
                 )
 
         try:
-            rows = self._store._conn.execute(query).fetchmany(_MAX_ROWS)
+            rows = store._conn.execute(query).fetchmany(_MAX_ROWS)
         except sqlite3.OperationalError as exc:
             return ToolResult(
                 tool_name="knowledge_sql",

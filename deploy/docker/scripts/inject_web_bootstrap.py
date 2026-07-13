@@ -3,14 +3,21 @@
 
 from __future__ import annotations
 
-import json
 import os
+import re
+import sys
 from pathlib import Path
 
-MARKER = 'id="openjarvis-docker-bootstrap"'
+# Allow import when run from /app/deploy/docker/scripts/
+_REPO_SRC = Path(__file__).resolve().parents[3] / "src"
+if str(_REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(_REPO_SRC))
+
+from openjarvis.server.web_ui_bootstrap import MARKER, inject_bootstrap  # noqa: E402
+
 INDEX_CANDIDATES = (
     Path("/app/src/openjarvis/server/static/index.html"),
-    Path("/app/src/openjarvis/server/static/index.html").resolve(),
+    Path(__file__).resolve().parents[3] / "src/openjarvis/server/static/index.html",
 )
 
 
@@ -25,45 +32,14 @@ def main() -> None:
         return
 
     html = index_path.read_text(encoding="utf-8")
-
-    payload = json.dumps(api_key)
-    script = f"""<script {MARKER}>
-(function() {{
-  try {{
-    var key = {payload};
-    var raw = localStorage.getItem("openjarvis-settings") || "{{}}";
-    var settings = JSON.parse(raw);
-    // Always sync from container env so a wrong manual paste cannot stick.
-    settings.apiKey = key;
-    if (!settings.apiUrl) settings.apiUrl = window.location.origin;
-    localStorage.setItem("openjarvis-settings", JSON.stringify(settings));
-  }} catch (e) {{}}
-}})();
-</script>"""
-
-    if MARKER in html:
-        import re
-
-        updated = re.sub(
-            rf"<script {re.escape(MARKER)}>.*?</script>",
-            script,
-            html,
-            count=1,
-            flags=re.DOTALL,
-        )
-        if updated != html:
-            index_path.write_text(updated, encoding="utf-8")
-            print("[openjarvis] Web UI bootstrap updated (API key resynced)")
-        else:
-            print("[openjarvis] Web bootstrap present but could not update")
-        return
-
-    if "</head>" not in html:
-        print("[openjarvis] Web bootstrap skipped: </head> missing")
-        return
-
-    index_path.write_text(html.replace("</head>", script + "\n</head>", 1), encoding="utf-8")
-    print("[openjarvis] Web UI bootstrap injected (API key for model list)")
+    updated = inject_bootstrap(html, api_key)
+    if updated != html:
+        index_path.write_text(updated, encoding="utf-8")
+        print("[openjarvis] Web UI bootstrap injected (API key for model list)")
+    elif MARKER in html:
+        print("[openjarvis] Web bootstrap already present")
+    else:
+        print("[openjarvis] Web bootstrap skipped: <head> missing")
 
 
 if __name__ == "__main__":

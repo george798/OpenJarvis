@@ -100,6 +100,23 @@ class TestStreamableHTTPTransport:
         first_call_headers = mock_client.post.call_args[1]["headers"]
         assert "Mcp-Session-Id" not in first_call_headers
 
+    def test_custom_headers(self, _mock_httpx_client):
+        """Custom headers (e.g. X-Goog-Api-Key) are sent on every request."""
+        from openjarvis.mcp.transport import StreamableHTTPTransport
+
+        mock_client = _mock_httpx_client
+        mock_client.post.return_value = _make_http_response({})
+
+        transport = StreamableHTTPTransport(
+            "https://stitch.googleapis.com/mcp",
+            headers={"X-Goog-Api-Key": "stitch-api-key"},
+        )
+        transport.send(MCPRequest(method="tools/list", id=1))
+
+        headers = mock_client.post.call_args[1]["headers"]
+        assert headers["X-Goog-Api-Key"] == "stitch-api-key"
+        assert "Authorization" not in headers
+
     def test_authorization_header_with_token(self, _mock_httpx_client):
         """Regression for #461 — token kwarg → Authorization: Bearer header."""
         from openjarvis.mcp.transport import StreamableHTTPTransport

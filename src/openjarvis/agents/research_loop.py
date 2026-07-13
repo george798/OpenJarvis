@@ -2,7 +2,8 @@
 
 A small, self-contained planner-executor loop:
 
-* the planner is a local Ollama chat model (default ``gemma4:31b``),
+* the planner is a local Ollama chat model (default ``gemma4:latest``,
+  overridable via ``[agent] research_model`` in config),
 * the only tool it can call is :meth:`HybridSearch.search`,
 * it gets up to ``max_iterations`` tool calls,
 * tool results are trimmed before re-entering the context window, and
@@ -30,7 +31,28 @@ from openjarvis.engine._base import InferenceEngine
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_PLANNER_MODEL = "gemma4:31b"
+DEFAULT_PLANNER_MODEL = "gemma4:latest"
+
+
+def resolve_planner_model(
+    override: Optional[str] = None,
+    config: Optional[Any] = None,
+) -> str:
+    """Return the Ollama model tag for Deep Research planning.
+
+    Resolution order: explicit override (CLI/API), ``[agent] research_model``
+    in config, then :data:`DEFAULT_PLANNER_MODEL`.
+    """
+    if override and override.strip():
+        return override.strip()
+    if config is None:
+        from openjarvis.core.config import load_config
+
+        config = load_config()
+    research_model = getattr(config.agent, "research_model", "") or ""
+    if research_model.strip():
+        return research_model.strip()
+    return DEFAULT_PLANNER_MODEL
 
 
 CLARIFY_TOOL_SPEC: Dict[str, Any] = {
@@ -456,7 +478,7 @@ class ResearchAgent:
     search:
         The HybridSearch instance the planner can call.
     model:
-        Planner model tag (default ``gemma4:31b``).
+        Planner model tag (see :func:`resolve_planner_model`).
     max_iterations:
         Hard ceiling on tool calls before the loop is forced into synthesis.
     temperature, max_tokens, num_ctx:
@@ -862,6 +884,7 @@ __all__ = [
     "CLARIFY_TOOL_SPEC",
     "SYSTEM_PROMPT",
     "DEFAULT_PLANNER_MODEL",
+    "resolve_planner_model",
     "shape_results_for_model",
     "build_sources_for_client",
 ]

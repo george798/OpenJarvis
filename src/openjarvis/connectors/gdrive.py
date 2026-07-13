@@ -20,8 +20,8 @@ from openjarvis.connectors.oauth import (
     delete_tokens,
     load_tokens,
     resolve_google_credentials,
-    run_oauth_flow,
     save_tokens,
+    store_google_app_credentials,
 )
 from openjarvis.core.config import DEFAULT_CONFIG_DIR
 from openjarvis.core.registry import ConnectorRegistry
@@ -41,6 +41,27 @@ _EXPORT_MIME_MAP: Dict[str, str] = {
     "application/vnd.google-apps.spreadsheet": "text/csv",
     "application/vnd.google-apps.presentation": "text/plain",
 }
+
+# Binary Drive files we download and convert to text (PDF, Office, plain text).
+_DOWNLOADABLE_MIMES: frozenset[str] = frozenset(
+    {
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "text/plain",
+        "text/markdown",
+        "text/csv",
+    }
+)
+
+# Folders, videos, and other blobs — metadata only (no download).
+_SKIP_MIMES: frozenset[str] = frozenset(
+    {
+        "application/vnd.google-apps.folder",
+        "application/vnd.google-apps.shortcut",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Module-level API functions (easy to patch in tests)
@@ -111,6 +132,66 @@ def _gdrive_api_export(token: str, file_id: str, mime_type: str) -> str:
     )
     resp.raise_for_status()
     return resp.text
+
+
+def _gdrive_api_download_media(token: str, file_id: str) -> bytes:
+    """Download raw file bytes via Drive ``alt=media``."""
+    resp = httpx.get(
+        f"{_GDRIVE_API_BASE}/files/{file_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"alt": "media"},
+        timeout=120.0,
+    )
+    resp.raise_for_status()
+    return resp.content
+
+
+def _extract_downloaded_content(data: bytes, mime_type: str, name: str) -> str:
+    """Convert downloaded Drive bytes to plain text for indexing."""
+    import io
+    import tempfile
+    from pathlib import Path
+
+    suffix_map = {
+        "application/pdf": ".pdf",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "text/plain": ".txt",
+        "text/markdown": ".md",
+        "text/csv": ".csv",
+    }
+    suffix = suffix_map.get(mime_type, Path(name).suffix or ".bin")
+
+    if mime_type in ("text/plain", "text/markdown", "text/csv"):
+        return data.decode("utf-8", errors="replace")
+
+    try:
+        from markitdown import MarkItDown
+
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+            tmp.write(data)
+            tmp.flush()
+            converted = MarkItDown().convert(tmp.name)
+            text = (converted.text_content or "").strip()
+            if text:
+                return text
+    except Exception:
+        pass
+
+    if mime_type == "application/pdf":
+        try:
+            import pdfplumber
+
+            with pdfplumber.open(io.BytesIO(data)) as pdf:
+                pages = [p.extract_text() or "" for p in pdf.pages]
+                text = "\n\n".join(p for p in pages if p.strip())
+                if text.strip():
+                    return text
+        except Exception:
+            pass
+
+    return f"[Could not extract text from {name}] ({mime_type})"
 
 
 # ---------------------------------------------------------------------------
@@ -186,29 +267,11 @@ class GDriveConnector(BaseConnector):
         # If user pastes client_id:client_secret, store and run OAuth flow
         if ":" in code and ".apps.googleusercontent.com" in code:
             client_id, client_secret = code.split(":", 1)
-            # Save credentials immediately
-            save_tokens(
+            store_google_app_credentials(
+                client_id,
+                client_secret,
                 self._credentials_path,
-                {
-                    "client_id": client_id.strip(),
-                    "client_secret": client_secret.strip(),
-                },
             )
-            # Run OAuth flow in background thread to avoid blocking
-            import threading
-
-            def _run() -> None:
-                try:
-                    run_oauth_flow(
-                        client_id=client_id.strip(),
-                        client_secret=client_secret.strip(),
-                        scopes=GOOGLE_ALL_SCOPES,
-                        credentials_path=self._credentials_path,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-
-            threading.Thread(target=_run, daemon=True).start()
         else:
             # Raw token or auth code
             save_tokens(self._credentials_path, {"token": code})
@@ -256,11 +319,14 @@ class GDriveConnector(BaseConnector):
                 mime_type: str = file_meta.get("mimeType", "")
                 web_view_link: Optional[str] = file_meta.get("webViewLink")
 
+                if mime_type in _SKIP_MIMES or mime_type.startswith("video/"):
+                    continue
+
                 # Determine author from first owner
                 owners: List[Dict[str, str]] = file_meta.get("owners", [])
                 author: str = owners[0].get("displayName", "") if owners else ""
 
-                # Export Google Workspace types; store metadata for others
+                # Export Google Workspace types; download + convert binaries.
                 export_mime = _EXPORT_MIME_MAP.get(mime_type)
                 if export_mime is not None:
                     try:
@@ -270,6 +336,16 @@ class GDriveConnector(BaseConnector):
                             file_id,
                             export_mime,
                         )
+                    except Exception:  # noqa: BLE001
+                        content = f"[File: {name}] ({mime_type})"
+                elif mime_type in _DOWNLOADABLE_MIMES:
+                    try:
+                        raw = call_with_refresh(
+                            _gdrive_api_download_media,
+                            self._credentials_path,
+                            file_id,
+                        )
+                        content = _extract_downloaded_content(raw, mime_type, name)
                     except Exception:  # noqa: BLE001
                         content = f"[File: {name}] ({mime_type})"
                 else:

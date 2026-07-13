@@ -484,19 +484,56 @@ async def telemetry_energy(request: Request):
 skills_router = APIRouter(prefix="/v1/skills", tags=["skills"])
 
 
+def _skills_config(request: Request):
+    return getattr(request.app.state, "config", None)
+
+
 @skills_router.get("")
 async def list_skills(request: Request):
-    """List installed skills."""
+    """List installed skills with name and description."""
     try:
-        from openjarvis.core.registry import SkillRegistry
+        from openjarvis.skills.context import discover_installed_skills
 
-        skills = []
-        for key in sorted(SkillRegistry.keys()):
-            skills.append({"name": key})
+        manifests = discover_installed_skills(_skills_config(request))
+        skills = [
+            {
+                "name": m.name,
+                "description": m.description or "",
+                "version": m.version,
+                "author": m.author,
+            }
+            for m in sorted(manifests.values(), key=lambda s: s.name)
+        ]
         return {"skills": skills}
     except Exception as exc:
         logger.warning("Failed to list skills: %s", exc)
         return {"skills": []}
+
+
+@skills_router.get("/{skill_name}")
+async def get_skill(skill_name: str, request: Request):
+    """Return skill metadata and full instruction content."""
+    try:
+        from openjarvis.skills.context import (
+            build_skill_prompt,
+            resolve_skill_manifest,
+        )
+
+        manifest = resolve_skill_manifest(skill_name, _skills_config(request))
+        if manifest is None:
+            raise HTTPException(status_code=404, detail=f"Skill not found: {skill_name}")
+        return {
+            "name": manifest.name,
+            "description": manifest.description or "",
+            "version": manifest.version,
+            "author": manifest.author,
+            "content": build_skill_prompt(manifest),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Failed to load skill %s: %s", skill_name, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @skills_router.post("")
@@ -869,6 +906,37 @@ async def learning_policy(request: Request):
     return result
 
 
+# ---- Web session bootstrap (unauthenticated — local Docker UI only) ----
+
+web_router = APIRouter(prefix="/v1/web", tags=["web"])
+
+
+@web_router.get("/bootstrap")
+async def web_bootstrap(request: Request):
+    """Return API key + default voice flags for the bundled web UI.
+
+    Exempt from auth so a stale PWA cache cannot block model list / voice chat.
+    Only intended for local ``jarvis serve`` behind loopback binding.
+    """
+    import os
+
+    api_key = os.environ.get("OPENJARVIS_API_KEY", "").strip()
+    if not api_key:
+        api_key = getattr(request.app.state, "api_key", "") or ""
+    cfg = getattr(request.app.state, "config", None)
+    tts_voice = "onyx"
+    if cfg is not None:
+        tts_voice = getattr(cfg.speech, "tts_voice_id", "") or tts_voice
+    return {
+        "apiKey": api_key,
+        "apiUrl": str(request.base_url).rstrip("/"),
+        "speechEnabled": True,
+        "voiceAssistantEnabled": True,
+        "ttsEnabled": True,
+        "ttsVoiceId": tts_voice,
+    }
+
+
 # ---- Speech routes ----
 
 speech_router = APIRouter(prefix="/v1/speech", tags=["speech"])
@@ -889,6 +957,10 @@ async def transcribe_speech(request: Request):
     audio_bytes = await audio_file.read()
     language = form.get("language")
 
+    cfg = getattr(request.app.state, "config", None)
+    if cfg and not language:
+        language = cfg.speech.language or None
+
     # Detect format from filename
     filename = getattr(audio_file, "filename", "audio.wav")
     ext = filename.rsplit(".", 1)[-1] if "." in filename else "wav"
@@ -904,14 +976,67 @@ async def transcribe_speech(request: Request):
 
 @speech_router.get("/health")
 async def speech_health(request: Request):
-    """Check if a speech backend is available."""
-    backend = getattr(request.app.state, "speech_backend", None)
-    if backend is None:
+    """Check if STT/TTS backends are available."""
+    stt = getattr(request.app.state, "speech_backend", None)
+    tts = getattr(request.app.state, "tts_backend", None)
+    cfg = getattr(request.app.state, "config", None)
+    if stt is None and tts is None:
         return {"available": False, "reason": "No speech backend configured"}
-    return {
-        "available": backend.health(),
-        "backend": backend.backend_id,
+    payload = {
+        "available": bool(stt and stt.health()),
+        "backend": getattr(stt, "backend_id", None),
+        "tts_available": bool(tts and tts.health()),
+        "tts_backend": getattr(tts, "backend_id", None),
     }
+    if cfg and stt and getattr(stt, "backend_id", None) == "faster-whisper":
+        payload["model"] = cfg.speech.model
+        payload["language"] = cfg.speech.language or "auto"
+    return payload
+
+
+@speech_router.get("/voices")
+async def speech_voices(request: Request):
+    """List voices for the active TTS backend."""
+    tts = getattr(request.app.state, "tts_backend", None)
+    if tts is None or not tts.health():
+        raise HTTPException(status_code=501, detail="TTS backend not configured")
+    return {"voices": tts.available_voices(), "backend": tts.backend_id}
+
+
+@speech_router.post("/synthesize")
+async def synthesize_speech(request: Request):
+    """Synthesize text to speech audio (MP3/WAV)."""
+    from fastapi.responses import Response
+
+    from openjarvis.core.config import load_config
+    from openjarvis.speech._tts_discovery import default_voice_id
+
+    tts = getattr(request.app.state, "tts_backend", None)
+    if tts is None or not tts.health():
+        raise HTTPException(status_code=501, detail="TTS backend not configured")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON body") from None
+
+    text = str(body.get("text", "")).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Missing 'text'")
+    if len(text) > 8000:
+        text = text[:8000]
+
+    cfg = getattr(request.app.state, "config", None) or load_config()
+    voice_id = str(body.get("voice_id") or default_voice_id(cfg))
+    speed = float(body.get("speed") or cfg.speech.tts_speed or 1.0)
+
+    try:
+        result = tts.synthesize(text, voice_id=voice_id, speed=speed)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    media = "audio/mpeg" if result.format == "mp3" else f"audio/{result.format}"
+    return Response(content=result.audio, media_type=media)
 
 
 # ---- Feedback routes ----
@@ -1030,6 +1155,7 @@ def include_all_routes(app) -> None:
     app.include_router(websocket_router)
     app.include_router(learning_router)
     app.include_router(speech_router)
+    app.include_router(web_router)
     app.include_router(feedback_router)
     app.include_router(optimize_router)
 
@@ -1079,6 +1205,7 @@ __all__ = [
     "websocket_router",
     "learning_router",
     "speech_router",
+    "web_router",
     "feedback_router",
     "optimize_router",
 ]

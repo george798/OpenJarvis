@@ -27,16 +27,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):  # noqa: ANN001
         if self._api_key and self._requires_auth(request.url.path):
             auth = request.headers.get("Authorization", "")
-            if not auth:
+            token = ""
+            if auth:
+                scheme, _, token = auth.partition(" ")
+                if scheme.lower() != "bearer":
+                    token = ""
+            elif request.query_params.get("token"):
+                # Browser OAuth popups cannot set Authorization headers.
+                token = request.query_params.get("token", "")
+            if not token:
                 return JSONResponse(
                     {"detail": "Missing Authorization header"},
                     status_code=401,
                 )
-            scheme, _, token = auth.partition(" ")
-            # Constant-time comparison to avoid leaking the key via timing.
-            if scheme.lower() != "bearer" or not secrets.compare_digest(
-                token, self._api_key
-            ):
+            if not secrets.compare_digest(token, self._api_key):
                 return JSONResponse(
                     {"detail": "Invalid API key"},
                     status_code=401,
@@ -49,8 +53,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         ``/metrics`` exposes request/token counters that should not be readable
         by unauthenticated clients, so it is gated alongside ``/v1`` and
-        ``/api``. ``/health`` stays open for liveness probes.
+        ``/api``. ``/health`` stays open for liveness probes. Speech health is
+        open so the mic UI can detect STT availability before auth bootstrap.
         """
+        if path in ("/v1/speech/health", "/v1/speech/transcribe", "/v1/web/bootstrap"):
+            return False
+        # Google redirects here after consent — no Bearer token available.
+        if "/oauth/callback" in path:
+            return False
         return (
             path.startswith("/v1/")
             or path.startswith("/api/")

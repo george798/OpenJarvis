@@ -10,6 +10,8 @@ const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJ
 declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
+    /** Injected by deploy/docker/scripts/inject_web_bootstrap.py in Docker builds. */
+    __OPENJARVIS_API_KEY__?: string;
   }
 }
 
@@ -58,6 +60,9 @@ export const getBase = (): string => {
 // same settings blob as the API URL, with an optional build-time env override.
 // Returns '' when unset, so a keyless local server keeps working unchanged.
 export const getApiKey = (): string => {
+  if (typeof window !== 'undefined' && window.__OPENJARVIS_API_KEY__) {
+    return String(window.__OPENJARVIS_API_KEY__).trim();
+  }
   try {
     const raw = localStorage.getItem('openjarvis-settings');
     if (raw) {
@@ -70,6 +75,76 @@ export const getApiKey = (): string => {
   }
   return '';
 };
+
+/** Sync Docker-injected credentials into localStorage before first API call. */
+export function syncDockerBootstrap(): void {
+  if (typeof window === 'undefined') return;
+  const injectedKey = window.__OPENJARVIS_API_KEY__?.trim();
+  if (!injectedKey) return;
+  try {
+    const raw = localStorage.getItem('openjarvis-settings') || '{}';
+    const settings = JSON.parse(raw) as Record<string, unknown>;
+    settings.apiKey = injectedKey;
+    if (!settings.apiUrl) settings.apiUrl = window.location.origin;
+    settings.speechEnabled = true;
+    settings.voiceAssistantEnabled = true;
+    settings.ttsEnabled = true;
+    if (settings.ttsVoiceId === undefined) settings.ttsVoiceId = 'onyx';
+    localStorage.setItem('openjarvis-settings', JSON.stringify(settings));
+  } catch {
+    // ignore
+  }
+}
+
+export interface WebBootstrap {
+  apiKey?: string;
+  apiUrl?: string;
+  speechEnabled?: boolean;
+  voiceAssistantEnabled?: boolean;
+  ttsEnabled?: boolean;
+  ttsVoiceId?: string;
+}
+
+/** Load session credentials from the server (works even when PWA cache is stale). */
+export async function fetchWebBootstrap(): Promise<WebBootstrap | null> {
+  if (isTauri()) return null;
+  const base = getBase() || (typeof window !== 'undefined' ? window.location.origin : '');
+  if (!base) return null;
+  try {
+    const res = await fetch(`${base.replace(/\/+$/, '')}/v1/web/bootstrap`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as WebBootstrap;
+    if (typeof window !== 'undefined' && data.apiKey) {
+      window.__OPENJARVIS_API_KEY__ = data.apiKey;
+    }
+    if (data.apiKey) {
+      try {
+        const raw = localStorage.getItem('openjarvis-settings') || '{}';
+        const settings = JSON.parse(raw) as Record<string, unknown>;
+        settings.apiKey = data.apiKey;
+        if (data.apiUrl) settings.apiUrl = data.apiUrl;
+        if (data.speechEnabled !== undefined) settings.speechEnabled = data.speechEnabled;
+        if (data.voiceAssistantEnabled !== undefined) {
+          settings.voiceAssistantEnabled = data.voiceAssistantEnabled;
+        }
+        if (data.ttsEnabled !== undefined) settings.ttsEnabled = data.ttsEnabled;
+        if (data.ttsVoiceId) settings.ttsVoiceId = data.ttsVoiceId;
+        localStorage.setItem('openjarvis-settings', JSON.stringify(settings));
+      } catch {
+        // ignore
+      }
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export async function initWebSession(): Promise<void> {
+  syncDockerBootstrap();
+  // Always refresh — stale PWA bundles may have wrong/missing credentials.
+  await fetchWebBootstrap();
+}
 
 // Build request headers with the Bearer Authorization token when a local key
 // is configured, merging any caller-supplied headers. Adds no Authorization
@@ -318,16 +393,25 @@ export interface TranscriptionResult {
 export interface SpeechHealth {
   available: boolean;
   backend?: string;
+  model?: string;
+  language?: string;
+  tts_available?: boolean;
+  tts_backend?: string;
   reason?: string;
 }
 
-export async function transcribeAudio(audioBlob: Blob, filename = 'recording.webm'): Promise<TranscriptionResult> {
+export async function transcribeAudio(
+  audioBlob: Blob,
+  filename = 'recording.webm',
+  language = 'en',
+): Promise<TranscriptionResult> {
   if (isTauri()) {
     try {
       const buffer = await audioBlob.arrayBuffer();
       return await tauriInvoke<TranscriptionResult>('transcribe_audio', {
         audioData: Array.from(new Uint8Array(buffer)),
         filename,
+        language,
       });
     } catch {
       // Fall through to fetch
@@ -335,11 +419,17 @@ export async function transcribeAudio(audioBlob: Blob, filename = 'recording.web
   }
   const formData = new FormData();
   formData.append('file', audioBlob, filename);
+  if (language) formData.append('language', language);
   const res = await apiFetch(`/v1/speech/transcribe`, {
     method: 'POST',
     body: formData,
   });
-  if (!res.ok) throw new Error(`Transcription failed: ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 401) {
+      throw new Error('Transcription failed: 401 — refresh the page or set API key in Settings');
+    }
+    throw new Error(`Transcription failed: ${res.status}`);
+  }
   return res.json();
 }
 
@@ -353,6 +443,25 @@ export async function fetchSpeechHealth(): Promise<SpeechHealth> {
   }
   const res = await apiFetch(`/v1/speech/health`);
   if (!res.ok) return { available: false };
+  return res.json();
+}
+
+export async function synthesizeSpeech(text: string, voiceId?: string): Promise<Blob> {
+  const res = await apiFetch(`/v1/speech/synthesize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text,
+      ...(voiceId ? { voice_id: voiceId } : {}),
+    }),
+  });
+  if (!res.ok) throw new Error(`TTS failed: ${res.status}`);
+  return res.blob();
+}
+
+export async function fetchSpeechVoices(): Promise<{ voices: string[]; backend: string }> {
+  const res = await apiFetch(`/v1/speech/voices`);
+  if (!res.ok) throw new Error(`Voices failed: ${res.status}`);
   return res.json();
 }
 
@@ -1101,4 +1210,17 @@ export async function setInferenceSource(
     // required…", "Could not store the API key…") as proper Error instances.
     throw new Error(e?.message ?? e ?? 'Failed to save inference source');
   }
+}
+
+export async function fetchSkills(): Promise<import('../types').SkillInfo[]> {
+  const res = await apiFetch('/v1/skills');
+  if (!res.ok) throw new Error(`Failed to list skills: ${res.status}`);
+  const data = await res.json();
+  return data.skills || [];
+}
+
+export async function fetchSkillDetail(name: string): Promise<import('../types').SkillDetail> {
+  const res = await apiFetch(`/v1/skills/${encodeURIComponent(name)}`);
+  if (!res.ok) throw new Error(`Failed to load skill ${name}: ${res.status}`);
+  return res.json();
 }

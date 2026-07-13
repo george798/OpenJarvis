@@ -24,6 +24,9 @@ Available commands:
 /agent <id> resume — resume an agent
 /notify <channel> — set where to receive notifications
 /sessions — list your active sessions
+/skills — list installed skills
+/model <name> — switch model for this session
+/voice on|off — toggle voice replies (channel TTS when available)
 /more — get the rest of a truncated response
 /help — show this message\
 """
@@ -170,6 +173,28 @@ class ChannelBridge:
             rest = parts[2] if len(parts) > 2 else "status"
             return self._handle_agent_command(agent_id, rest)
 
+        if cmd == "/skills":
+            return self._handle_skills_list()
+
+        if cmd == "/model" and len(parts) >= 2:
+            model_name = parts[1]
+            self._session_store.set_session_metadata(
+                sender_id,
+                channel_type,
+                {"model": model_name},
+            )
+            return f"Model set to {model_name} for this session."
+
+        if cmd == "/voice" and len(parts) >= 2:
+            mode = parts[1].lower()
+            enabled = mode in ("on", "true", "1", "yes")
+            self._session_store.set_session_metadata(
+                sender_id,
+                channel_type,
+                {"voice_enabled": enabled},
+            )
+            return f"Voice replies {'enabled' if enabled else 'disabled'}."
+
         # Unknown command — fall through to chat
         return None
 
@@ -214,6 +239,22 @@ class ChannelBridge:
         # Treat as a message to the agent
         result = self._agent_manager.send_message(agent_id, action)
         return str(result) if result else f"Message sent to agent '{agent_id}'."
+
+    def _handle_skills_list(self) -> str:
+        mgr = getattr(self._system, "skill_manager", None) if self._system else None
+        if mgr is None:
+            return "Skills not available on this server."
+        try:
+            names = mgr.skill_names()
+        except Exception as exc:
+            return f"Could not list skills: {exc}"
+        if not names:
+            return "No skills installed. Run: jarvis skill sync hermes"
+        lines = [f"  {name}" for name in names[:40]]
+        extra = ""
+        if len(names) > 40:
+            extra = f"\n  ... and {len(names) - 40} more"
+        return f"Installed skills ({len(names)}):\n" + "\n".join(lines) + extra
 
     # --------------------------------------------------------------
     # Chat handling
@@ -265,7 +306,16 @@ class ChannelBridge:
                 response_text = f"Research error: {exc}"
         elif self._system is not None:
             try:
-                result = self._system.ask(query)
+                tools = None
+                config = getattr(self._system, "config", None)
+                if config is not None:
+                    from openjarvis.hermes.toolsets import resolve_tool_names
+
+                    tools = resolve_tool_names(channel_type, config)
+                ask_kwargs: dict = {}
+                if tools is not None:
+                    ask_kwargs["tools"] = tools
+                result = self._system.ask(query, **ask_kwargs)
                 response_text = result.get("content", str(result))
             except Exception:
                 logger.exception("Error in JarvisSystem.ask()")

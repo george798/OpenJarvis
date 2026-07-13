@@ -93,8 +93,21 @@ class KnowledgeSearchTool(BaseTool):
             category="knowledge",
         )
 
+    def _get_store(self) -> Optional[KnowledgeStore]:
+        """Return the configured store, or lazily open the default knowledge.db."""
+        if self._store is not None:
+            return self._store
+        if self._retriever is not None:
+            return None
+        try:
+            self._store = KnowledgeStore()
+            return self._store
+        except Exception:
+            return None
+
     def execute(self, **params: Any) -> ToolResult:
-        if self._store is None and self._retriever is None:
+        store = self._get_store()
+        if store is None and self._retriever is None:
             return ToolResult(
                 tool_name="knowledge_search",
                 content="No knowledge store configured.",
@@ -127,7 +140,7 @@ class KnowledgeSearchTool(BaseTool):
                 until=until or "",
             )
         else:
-            results = self._store.retrieve(  # type: ignore[union-attr]
+            results = store.retrieve(
                 query,
                 top_k=top_k,
                 source=source,

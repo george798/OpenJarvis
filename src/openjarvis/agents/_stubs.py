@@ -172,9 +172,28 @@ class BaseAgent(ABC):
             except Exception:
                 effective_system_prompt = None
         if effective_system_prompt:
+            skill_prompt = ""
+            if context and context.metadata:
+                skill_prompt = str(
+                    context.metadata.get("active_skill_prompt", "") or ""
+                ).strip()
+            if skill_prompt:
+                effective_system_prompt = (
+                    f"{effective_system_prompt}\n\n"
+                    "=== ACTIVE SKILL (MANDATORY — follow before any other approach) ===\n"
+                    f"{skill_prompt}\n"
+                    "=== END ACTIVE SKILL ==="
+                )
             messages.append(Message(role=Role.SYSTEM, content=effective_system_prompt))
         if context and context.conversation.messages:
-            messages.extend(context.conversation.messages)
+            # Skip injected skill system messages — skill is merged into the
+            # primary system prompt via metadata.active_skill_prompt.
+            for m in context.conversation.messages:
+                if m.role == Role.SYSTEM and (
+                    (m.content or "").startswith("# Active skill:")
+                ):
+                    continue
+                messages.append(m)
         messages.append(Message(role=Role.USER, content=input))
         return messages
 

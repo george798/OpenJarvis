@@ -174,6 +174,26 @@ def save_client_credentials(
         save_tokens(str(path), existing)
 
 
+def store_google_app_credentials(
+    client_id: str,
+    client_secret: str,
+    credentials_path: str,
+) -> None:
+    """Save Google OAuth app credentials without starting a local OAuth server.
+
+    Web UI flows complete authorization via ``/v1/connectors/{id}/oauth/start``
+    in the user's browser. The in-container ``run_oauth_flow`` thread cannot
+    open a browser or receive callbacks when OpenJarvis runs in Docker.
+    """
+    save_tokens(
+        credentials_path,
+        {
+            "client_id": client_id.strip(),
+            "client_secret": client_secret.strip(),
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Shared credentials file — one OAuth flow covers all Google connectors
 # ---------------------------------------------------------------------------

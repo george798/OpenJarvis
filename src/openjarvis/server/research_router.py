@@ -31,10 +31,8 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from openjarvis.agents.research_loop import (
-    DEFAULT_PLANNER_MODEL,
-    ResearchAgent,
-)
+from openjarvis.agents.research_loop import ResearchAgent, resolve_planner_model
+from openjarvis.core.config import load_config
 from openjarvis.connectors.embeddings import OllamaEmbedder
 from openjarvis.connectors.hybrid_search import HybridSearch
 from openjarvis.connectors.store import KnowledgeStore
@@ -244,12 +242,11 @@ class _LiveGPUSampler:
 
 class ResearchRequest(BaseModel):
     query: str = Field(..., description="Natural-language question to research.")
-    # Deep Research has its own model requirements (function-calling support,
-    # sufficient reasoning capability) that the chat-model selector should not
-    # override. We accept the field for forward-compat with older clients but
-    # ignore it — the planner always runs on DEFAULT_PLANNER_MODEL.
+    # Deep Research requires a local Ollama model with tool-calling support.
+    # When omitted, uses [agent] research_model from config, then gemma4:latest.
     model: Optional[str] = Field(
-        default=None, description="Ignored; retained for client compatibility."
+        default=None,
+        description="Optional Ollama model override for the research planner.",
     )
 
 
@@ -480,14 +477,10 @@ async def research(req: ResearchRequest) -> StreamingResponse:
     terminates the stream so clients can detect end-of-response without
     parsing the underlying ``[DONE]`` sentinel used by OpenAI-style routes.
     """
-    if req.model and req.model != DEFAULT_PLANNER_MODEL:
-        logger.info(
-            "research: ignoring client model=%r; using DEFAULT_PLANNER_MODEL=%r",
-            req.model,
-            DEFAULT_PLANNER_MODEL,
-        )
+    planner_model = resolve_planner_model(req.model, load_config())
+    logger.debug("research: planner_model=%s", planner_model)
     return StreamingResponse(
-        _stream_research(req.query, DEFAULT_PLANNER_MODEL),
+        _stream_research(req.query, planner_model),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

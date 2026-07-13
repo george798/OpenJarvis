@@ -67,6 +67,16 @@ function saveConversations(store: ConversationStore): void {
 
 export type ThemeMode = 'light' | 'dark' | 'system';
 
+/** Visual state for the Jarvis voice orb (mic / TTS / agent). */
+export type VoiceOrbState = 'idle' | 'recording' | 'transcribing' | 'speaking' | 'thinking';
+
+export interface VoiceControlSnapshot {
+  toggleMic: () => void;
+  orbState: VoiceOrbState;
+  voiceStatus: string | null;
+  disabled: boolean;
+}
+
 interface Settings {
   theme: ThemeMode;
   apiUrl: string;
@@ -80,6 +90,11 @@ interface Settings {
   temperature: number;
   maxTokens: number;
   speechEnabled: boolean;
+  voiceAssistantEnabled: boolean;
+  ttsEnabled: boolean;
+  ttsVoiceId: string;
+  /** Ollama model tag for Deep Research planner (empty = server default). */
+  deepResearchModel: string;
 }
 
 function loadSettings(): Settings {
@@ -92,7 +107,11 @@ function loadSettings(): Settings {
     defaultAgent: '',
     temperature: 0.7,
     maxTokens: 4096,
-    speechEnabled: false,
+    speechEnabled: true,
+    voiceAssistantEnabled: true,
+    ttsEnabled: true,
+    ttsVoiceId: 'onyx',
+    deepResearchModel: '',
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -136,6 +155,10 @@ interface AppState {
 
   // Command palette
   commandPaletteOpen: boolean;
+
+  // Skills picker
+  skillsPickerOpen: boolean;
+  activeSkill: string | null;
 
   // Sidebar
   sidebarOpen: boolean;
@@ -195,6 +218,8 @@ interface AppState {
 
   // Actions: UI
   setCommandPaletteOpen: (open: boolean) => void;
+  setSkillsPickerOpen: (open: boolean) => void;
+  setActiveSkill: (skillName: string | null) => void;
   toggleSidebar: () => void;
   setSidebarOpen: (open: boolean) => void;
   toggleSystemPanel: () => void;
@@ -232,6 +257,10 @@ interface AppState {
   // Model loading
   modelLoading: boolean;
   setModelLoading: (loading: boolean) => void;
+
+  // Voice orb bridge — InputArea registers; JarvisOrb reads
+  voiceControl: VoiceControlSnapshot | null;
+  setVoiceControl: (control: VoiceControlSnapshot | null) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => {
@@ -258,6 +287,11 @@ export const useAppStore = create<AppState>((set, get) => {
     settings: loadSettings(),
 
     commandPaletteOpen: false,
+    skillsPickerOpen: false,
+    activeSkill:
+      initial.activeId && initial.conversations[initial.activeId]
+        ? initial.conversations[initial.activeId].activeSkill ?? null
+        : null,
     sidebarOpen: true,
     systemPanelOpen: true,
 
@@ -335,6 +369,7 @@ export const useAppStore = create<AppState>((set, get) => {
         ),
         activeId: conv.id,
         messages: [],
+        activeSkill: null,
       });
       return conv.id;
     },
@@ -347,6 +382,7 @@ export const useAppStore = create<AppState>((set, get) => {
       set({
         activeId: id,
         messages: conv ? conv.messages : [],
+        activeSkill: conv?.activeSkill ?? null,
       });
     },
 
@@ -368,6 +404,7 @@ export const useAppStore = create<AppState>((set, get) => {
         conversations: convList,
         activeId: store.activeId,
         messages: activeConv ? activeConv.messages : [],
+        activeSkill: activeConv?.activeSkill ?? null,
       });
     },
 
@@ -488,6 +525,27 @@ export const useAppStore = create<AppState>((set, get) => {
     // ── UI ──────────────────────────────────────────────────────────
 
     setCommandPaletteOpen: (open: boolean) => set({ commandPaletteOpen: open }),
+    setSkillsPickerOpen: (open: boolean) => set({ skillsPickerOpen: open }),
+    setActiveSkill: (skillName: string | null) => {
+      const { activeId } = get();
+      if (activeId) {
+        const store = loadConversations();
+        const conv = store.conversations[activeId];
+        if (conv) {
+          conv.activeSkill = skillName;
+          conv.updatedAt = Date.now();
+          saveConversations(store);
+          set({
+            activeSkill: skillName,
+            conversations: Object.values(store.conversations).sort(
+              (a, b) => b.updatedAt - a.updatedAt,
+            ),
+          });
+          return;
+        }
+      }
+      set({ activeSkill: skillName });
+    },
     toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
     setSidebarOpen: (open: boolean) => set({ sidebarOpen: open }),
     toggleSystemPanel: () => set((s) => ({ systemPanelOpen: !s.systemPanelOpen })),
@@ -519,6 +577,9 @@ export const useAppStore = create<AppState>((set, get) => {
     // ── Model loading ───────────────────────────────────────────────
     modelLoading: false,
     setModelLoading: (loading) => set({ modelLoading: loading }),
+
+    voiceControl: null,
+    setVoiceControl: (control) => set({ voiceControl: control }),
 
     // ── Opt-in sharing ──────────────────────────────────────────────
 

@@ -13,6 +13,7 @@ Supports two modes:
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import re
 from typing import Any, List, Optional
 
@@ -22,6 +23,35 @@ from openjarvis.core.registry import AgentRegistry
 from openjarvis.core.types import Message, Role, ToolCall, ToolResult
 from openjarvis.engine._stubs import InferenceEngine
 from openjarvis.tools._stubs import BaseTool
+
+# Common hallucinated tool names → registered OpenJarvis tools.
+_TOOL_NAME_ALIASES: dict[str, str] = {
+    "open_url": "browser_navigate",
+    "open_website": "browser_navigate",
+    "navigate": "browser_navigate",
+    "browse": "browser_navigate",
+    "browse_web": "browser_navigate",
+    "visit_url": "browser_navigate",
+    "open_reddit": "browser_navigate",
+    "open_up_reddit": "browser_navigate",
+    "search_web": "web_search",
+    "web_search_tool": "web_search",
+    "internet_search": "web_search",
+    "google_search": "web_search",
+}
+
+_LOOSE_TOOL_NAME_RE = re.compile(
+    r'["\']?(?:name|tool|tool_name)["\']?\s*:\s*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+_LOOSE_URL_RE = re.compile(
+    r'["\']url["\']\s*:\s*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+_LOOSE_QUERY_RE = re.compile(
+    r'["\']query["\']\s*:\s*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
 
 
 @AgentRegistry.register("orchestrator")
@@ -60,6 +90,7 @@ class OrchestratorAgent(ToolUsingAgent):
         parallel_tools: bool = True,
         interactive: bool = False,
         confirm_callback=None,
+        prompt_builder: Optional[Any] = None,
     ) -> None:
         super().__init__(
             engine,
@@ -71,6 +102,7 @@ class OrchestratorAgent(ToolUsingAgent):
             max_tokens=max_tokens,
             interactive=interactive,
             confirm_callback=confirm_callback,
+            prompt_builder=prompt_builder,
         )
         self._mode = mode
         self._system_prompt = system_prompt
@@ -83,8 +115,20 @@ class OrchestratorAgent(ToolUsingAgent):
         **kwargs: Any,
     ) -> AgentResult:
         if self._mode == "structured":
-            return self._run_structured(input, context, **kwargs)
-        return self._run_function_calling(input, context, **kwargs)
+            result = self._run_structured(input, context, **kwargs)
+        else:
+            result = self._run_function_calling(input, context, **kwargs)
+
+        # Hermes-style learning loop: distill successful multi-step tasks
+        # into reusable skills (fire-and-forget background reflection).
+        try:
+            from openjarvis.hermes.skill_loop import maybe_learn_skill
+
+            maybe_learn_skill(self, input, result)
+        except Exception:
+            pass
+
+        return result
 
     # ------------------------------------------------------------------
     # Structured mode (THOUGHT/TOOL/INPUT/FINAL_ANSWER)
@@ -201,6 +245,223 @@ class OrchestratorAgent(ToolUsingAgent):
 
         return result
 
+    @staticmethod
+    def _iter_json_objects(text: str):
+        """Yield top-level JSON objects parsed from arbitrary text.
+
+        Walks the string tracking brace depth (ignoring braces inside string
+        literals) and attempts to ``json.loads`` each balanced ``{...}`` span.
+        """
+        depth = 0
+        start = -1
+        in_str = False
+        esc = False
+        for i, ch in enumerate(text):
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}" and depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    try:
+                        obj = json.loads(text[start : i + 1])
+                    except Exception:
+                        obj = None
+                    if isinstance(obj, dict):
+                        yield obj
+                    start = -1
+
+    @staticmethod
+    def _resolve_tool_name(raw_name: str, known: set[str]) -> str | None:
+        """Map a model-emitted tool name to a registered tool, if possible."""
+        name = raw_name.strip()
+        if name in known:
+            return name
+        alias = _TOOL_NAME_ALIASES.get(name.lower().replace("-", "_"))
+        if alias and alias in known:
+            return alias
+        key = name.lower().replace("-", "_")
+        if any(token in key for token in ("navigate", "open_url", "browse", "visit")):
+            if "browser_navigate" in known:
+                return "browser_navigate"
+        if any(token in key for token in ("search", "lookup")):
+            if "web_search" in known:
+                return "web_search"
+        return None
+
+    @staticmethod
+    def _default_args_for_tool(canonical: str, raw_name: str, args: dict) -> dict:
+        """Fill missing required fields for alias-recovered tool calls."""
+        merged = dict(args)
+        raw_key = raw_name.lower().replace("-", "_")
+        if canonical == "browser_navigate" and not merged.get("url"):
+            if "reddit" in raw_key:
+                merged["url"] = "https://www.reddit.com/"
+        return merged
+
+    def _coerce_recovered_tool(
+        self, raw_name: str, args: Any, known: set[str]
+    ) -> dict | None:
+        canonical = self._resolve_tool_name(raw_name, known)
+        if canonical is None:
+            return None
+        if isinstance(args, str):
+            try:
+                args_dict = json.loads(args) if args.strip() else {}
+            except Exception:
+                args_dict = {}
+        elif isinstance(args, dict):
+            args_dict = args
+        else:
+            args_dict = {}
+        args_dict = self._default_args_for_tool(canonical, raw_name, args_dict)
+        return {
+            "name": canonical,
+            "arguments": json.dumps(args_dict),
+        }
+
+    def _recover_loose_tool_calls(self, content: str, known: set[str]) -> list[dict]:
+        """Recover tool calls from partial / malformed JSON text blobs."""
+        recovered: list[dict] = []
+        name_match = _LOOSE_TOOL_NAME_RE.search(content)
+        if not name_match:
+            return recovered
+        raw_name = name_match.group(1)
+        args: dict[str, str] = {}
+        url_match = _LOOSE_URL_RE.search(content)
+        if url_match:
+            args["url"] = url_match.group(1)
+        query_match = _LOOSE_QUERY_RE.search(content)
+        if query_match:
+            args["query"] = query_match.group(1)
+        coerced = self._coerce_recovered_tool(raw_name, args, known)
+        if coerced:
+            recovered.append(coerced)
+        return recovered
+
+    def _recover_text_tool_calls(self, content: str) -> list[dict]:
+        """Recover tool calls a model emitted as JSON text.
+
+        Local models (e.g. ``qwen2.5-coder:7b``) often print a
+        ```json {"name": ..., "arguments": {...}}``` blob in the content
+        instead of returning OpenAI-style ``tool_calls``, or invent names
+        like ``open_url`` instead of ``browser_navigate``. Known aliases
+        are mapped to registered tools so the loop can execute them.
+        """
+        if not content or not self._tools:
+            return []
+        known = {t.spec.name for t in self._tools}
+        recovered: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+
+        def _add(raw_name: str, args: Any) -> None:
+            coerced = self._coerce_recovered_tool(raw_name, args, known)
+            if coerced is None:
+                return
+            key = (coerced["name"], coerced["arguments"])
+            if key in seen:
+                return
+            seen.add(key)
+            recovered.append(coerced)
+
+        if "{" in content:
+            for blob in self._iter_json_objects(content):
+                raw_name = blob.get("name") or blob.get("tool") or blob.get("tool_name")
+                if isinstance(raw_name, str):
+                    _add(
+                        raw_name,
+                        blob.get(
+                            "arguments",
+                            blob.get("parameters", blob.get("input")),
+                        ),
+                    )
+
+        for item in self._recover_loose_tool_calls(content, known):
+            key = (item["name"], item["arguments"])
+            if key not in seen:
+                seen.add(key)
+                recovered.append(item)
+
+        return recovered
+
+    def _infer_tool_from_input(self, user_input: str, known: set[str]) -> list[dict]:
+        """Last-resort tool inference when the model fails to call a tool."""
+        text = user_input.lower()
+        if "browser_navigate" in known and "reddit" in text:
+            if any(word in text for word in ("open", "browse", "visit", "launch", "go to")):
+                return [
+                    {
+                        "name": "browser_navigate",
+                        "arguments": json.dumps({"url": "https://www.reddit.com/"}),
+                    }
+                ]
+        return []
+
+    def _empty_after_tools_nudge(self, last_tr: ToolResult) -> str:
+        """Prompt the model to continue when it returns empty text after tools."""
+        if last_tr.tool_name == "COMPOSIO_SEARCH_TOOLS":
+            return (
+                "You called COMPOSIO_SEARCH_TOOLS but stopped without executing or "
+                "answering. Call COMPOSIO_MULTI_EXECUTE_TOOL with the Reddit action "
+                "from the plan (e.g. REDDIT_RETRIEVE_REDDIT_POST or "
+                "REDDIT_SEARCH_ACROSS_SUBREDDITS), then reply with a plain-text "
+                "summary for the user. Do not call COMPOSIO_SEARCH_TOOLS again."
+            )
+        return (
+            "You ran tools but returned no final answer. Continue: call the next "
+            "needed tool or summarize the tool results for the user in plain text."
+        )
+
+    def _synthesize_from_tool_results(self, tool_results: list[ToolResult]) -> str:
+        """Build a user-visible summary when the model never answers after tools."""
+        snippets = []
+        for tr in tool_results[-4:]:
+            body = (tr.content or "")[:800]
+            snippets.append(
+                f"**{tr.tool_name}** ({'ok' if tr.success else 'failed'}):\n{body}"
+            )
+        return (
+            f"I ran {len(tool_results)} tool(s) but could not produce a final summary. "
+            "Partial results:\n\n"
+            + "\n\n".join(snippets)
+            + "\n\nAsk me to continue or try a narrower question."
+        )
+
+    def _normalize_raw_tool_calls(
+        self, raw_tool_calls: list[dict]
+    ) -> list[dict]:
+        """Normalize structured tool_calls (alias names, JSON args)."""
+        if not raw_tool_calls or not self._tools:
+            return raw_tool_calls
+        known = {t.spec.name for t in self._tools}
+        normalized: list[dict] = []
+        for tc in raw_tool_calls:
+            raw_name = tc.get("name", "")
+            if not isinstance(raw_name, str):
+                normalized.append(tc)
+                continue
+            coerced = self._coerce_recovered_tool(
+                raw_name,
+                tc.get("arguments", "{}"),
+                known,
+            )
+            if coerced is None:
+                normalized.append(tc)
+            else:
+                normalized.append({**tc, **coerced})
+        return normalized
+
     # ------------------------------------------------------------------
     # Function-calling mode (original behaviour)
     # ------------------------------------------------------------------
@@ -245,10 +506,44 @@ class OrchestratorAgent(ToolUsingAgent):
             content = result.get("content", "")
             raw_tool_calls = result.get("tool_calls", [])
 
-            # No tool calls -> check continuation, then final answer
+            # Recover tool calls that the model emitted as a JSON blob in the
+            # content instead of as structured tool_calls (common with small
+            # local models). Without this the agent would "describe" browsing
+            # or searching without ever executing the tool.
+            if not raw_tool_calls and content:
+                recovered = self._recover_text_tool_calls(content)
+                if recovered:
+                    raw_tool_calls = recovered
+            elif raw_tool_calls:
+                raw_tool_calls = self._normalize_raw_tool_calls(raw_tool_calls)
+
+            # No tool calls -> infer from user intent, then final answer
+            if not raw_tool_calls:
+                known = {t.spec.name for t in self._tools} if self._tools else set()
+                inferred: list[dict] = []
+                # Only infer from the user message on the first turn — re-running
+                # inference every turn prevents the model from giving a final answer
+                # after tool results (burns max_turns on Composio / Reddit flows).
+                if turns == 1:
+                    inferred = self._infer_tool_from_input(input, known)
+                if inferred:
+                    raw_tool_calls = inferred
+
             if not raw_tool_calls:
                 content = self._check_continuation(result, messages)
                 content = self._strip_think_tags(content)
+                # Qwen sometimes returns empty after a tool result (especially
+                # large COMPOSIO_SEARCH_TOOLS payloads). Nudge once per stall.
+                if not content.strip() and all_tool_results and turns < self._max_turns:
+                    messages.append(
+                        Message(
+                            role=Role.USER,
+                            content=self._empty_after_tools_nudge(all_tool_results[-1]),
+                        )
+                    )
+                    continue
+                if not content.strip() and all_tool_results:
+                    content = self._synthesize_from_tool_results(all_tool_results)
                 self._emit_turn_end(turns=turns, content_length=len(content))
                 return AgentResult(
                     content=content,
@@ -357,8 +652,19 @@ class OrchestratorAgent(ToolUsingAgent):
                         )
                     )
 
-        # Max turns exceeded
+        # Max turns exceeded — return partial results if the model never answered
         final_content = self._strip_think_tags(content) if content else ""
+        if not final_content.strip() and all_tool_results:
+            snippets = []
+            for tr in all_tool_results[-4:]:
+                body = (tr.content or "")[:800]
+                snippets.append(f"**{tr.tool_name}** ({'ok' if tr.success else 'failed'}):\n{body}")
+            final_content = (
+                "I hit the turn limit before finishing. Partial results from the "
+                f"last {len(snippets)} tool call(s):\n\n"
+                + "\n\n".join(snippets)
+                + "\n\nAsk me to continue or try a narrower question."
+            )
         self._emit_turn_end(turns=turns, max_turns_exceeded=True)
         return AgentResult(
             content=final_content or "Maximum turns reached without a final answer.",

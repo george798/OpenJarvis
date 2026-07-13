@@ -9,10 +9,11 @@ import { AgentsPage } from './pages/AgentsPage';
 import { DataSourcesPage } from './pages/DataSourcesPage';
 import { LogsPage } from './pages/LogsPage';
 import { CommandPalette } from './components/CommandPalette';
+import { SkillsPicker } from './components/Chat/SkillsPicker';
 import { SetupScreen } from './components/SetupScreen';
 import { Toaster } from './components/ui/sonner';
 import { useAppStore } from './lib/store';
-import { fetchModels, fetchServerInfo, fetchSavings, submitSavings, isTauri } from './lib/api';
+import { fetchModels, fetchServerInfo, fetchSavings, submitSavings, isTauri, initWebSession, getApiKey } from './lib/api';
 import { OptInModal } from './components/OptInModal';
 import { UpdateChecker } from './components/Desktop/UpdateChecker';
 import { track, hashId } from './lib/analytics';
@@ -36,8 +37,10 @@ export default function App() {
   const setServerInfo = useAppStore((s) => s.setServerInfo);
   const setSavings = useAppStore((s) => s.setSavings);
   const settings = useAppStore((s) => s.settings);
+  const updateSettings = useAppStore((s) => s.updateSettings);
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
   const setCommandPaletteOpen = useAppStore((s) => s.setCommandPaletteOpen);
+  const skillsPickerOpen = useAppStore((s) => s.skillsPickerOpen);
   const optInEnabled = useAppStore((s) => s.optInEnabled);
   const optInDisplayName = useAppStore((s) => s.optInDisplayName);
   const optInEmail = useAppStore((s) => s.optInEmail);
@@ -67,14 +70,50 @@ export default function App() {
 
   // Fetch models on mount and when API credentials change
   useEffect(() => {
-    setModelsLoading(true);
-    fetchModels()
-      .then((m) => {
-        setModels(m);
-        if (!selectedModel && m.length > 0) setSelectedModel(m[0].id);
-      })
-      .catch(() => setModels([]))
-      .finally(() => setModelsLoading(false));
+    let cancelled = false;
+    (async () => {
+      await initWebSession();
+      if (cancelled) return;
+      try {
+        const raw = localStorage.getItem('openjarvis-settings');
+        if (raw) {
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
+          updateSettings({
+            apiKey: typeof parsed.apiKey === 'string' ? parsed.apiKey : undefined,
+            apiUrl: typeof parsed.apiUrl === 'string' ? parsed.apiUrl : undefined,
+            speechEnabled: parsed.speechEnabled !== false,
+            voiceAssistantEnabled: parsed.voiceAssistantEnabled !== false,
+            ttsEnabled: parsed.ttsEnabled !== false,
+          });
+        }
+      } catch {
+        // ignore
+      }
+      if (cancelled) return;
+      setModelsLoading(true);
+      const loadModels = () =>
+        fetchModels()
+          .then((m) => {
+            if (cancelled) return;
+            setModels(m);
+            if (!selectedModel && m.length > 0) setSelectedModel(m[0].id);
+          })
+          .catch(() => {
+            if (!cancelled) setModels([]);
+          })
+          .finally(() => {
+            if (!cancelled) setModelsLoading(false);
+          });
+      await loadModels();
+      // Retry once if bootstrap landed after first paint (stale PWA recovery).
+      if (!cancelled && useAppStore.getState().models.length === 0 && getApiKey()) {
+        await new Promise((r) => setTimeout(r, 400));
+        if (!cancelled) await loadModels();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [settings.apiKey, settings.apiUrl]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch server info
@@ -197,6 +236,7 @@ export default function App() {
       </Routes>
       <Toaster position="bottom-right" />
       {commandPaletteOpen && <CommandPalette />}
+      {skillsPickerOpen && <SkillsPicker />}
       {optInModalOpen && (
         <OptInModal onClose={() => setOptInModalOpen(false)} />
       )}

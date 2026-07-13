@@ -7,6 +7,7 @@ export interface ChatRequest {
   stream: true;
   temperature?: number;
   max_tokens?: number;
+  skill?: string;
 }
 
 export async function* streamChat(
@@ -60,15 +61,18 @@ export async function* streamChat(
 
 export async function* streamResearch(
   query: string,
+  model?: string,
   signal?: AbortSignal,
 ): AsyncGenerator<ResearchEvent> {
   // /api/research is mounted at the server root — strip any trailing /v1
   // from the base so configurations like "http://host:8000/v1" still resolve.
   const base = getBase().replace(/\/v1\/?$/, '');
+  const body: { query: string; model?: string } = { query };
+  if (model?.trim()) body.model = model.trim();
   const response = await fetch(`${base}/api/research`, {
     method: 'POST',
     headers: authHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ query }),
+    body: JSON.stringify(body),
     signal,
   });
 

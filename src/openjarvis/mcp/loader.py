@@ -20,7 +20,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 from typing import TYPE_CHECKING, Any, Optional
+
+_ENV_REF = re.compile(r"\$\{([^}]+)\}")
 
 if TYPE_CHECKING:
     from openjarvis.core.types import ToolSpec  # noqa: F401
@@ -28,6 +32,21 @@ if TYPE_CHECKING:
     from openjarvis.tools._stubs import BaseTool
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_env(value: str) -> str:
+    """Expand ``${VAR}`` placeholders from the process environment."""
+    return _ENV_REF.sub(lambda m: os.environ.get(m.group(1), ""), value)
+
+
+def _resolve_headers(headers: Any) -> dict[str, str]:
+    if not isinstance(headers, dict):
+        return {}
+    resolved: dict[str, str] = {}
+    for key, value in headers.items():
+        if isinstance(value, str):
+            resolved[str(key)] = _resolve_env(value)
+    return resolved
 
 
 def load_mcp_tools_from_config(
@@ -49,6 +68,16 @@ def load_mcp_tools_from_config(
     Returns ``([], [])`` when mcp is disabled or no servers are
     configured — no exception, no warning.
     """
+    # MCP headers often reference ${COMPOSIO_API_KEY} etc. Ensure vault
+    # secrets are in os.environ before resolving (jarvis ask skips serve's
+    # startup injection).
+    try:
+        from openjarvis.core.secret_vault import inject_vault_into_environ
+
+        inject_vault_into_environ()
+    except Exception:
+        pass
+
     # ``enabled`` and ``servers`` come from openjarvis.core.config's
     # MCPConfig dataclass; accept duck-typed equivalents for tests.
     enabled = getattr(mcp_cfg, "enabled", False)
@@ -81,6 +110,7 @@ def load_mcp_tools_from_config(
     clients: list["MCPClient"] = []
 
     for server_cfg in server_list:
+        cfg: dict[str, Any] | None = None
         try:
             cfg = (
                 json.loads(server_cfg) if isinstance(server_cfg, str) else server_cfg
@@ -88,35 +118,79 @@ def load_mcp_tools_from_config(
             name = cfg.get("name", "<unnamed>")
             url = cfg.get("url")
             token = cfg.get("token")
+            headers = _resolve_headers(cfg.get("headers"))
             command = cfg.get("command", "")
             args = cfg.get("args", [])
 
-            if url:
-                transport = StreamableHTTPTransport(url=url, token=token)
-            elif command:
-                transport = StdioTransport(command=[command] + args)
-            else:
-                logger.warning(
-                    "MCP server '%s' has neither 'url' nor 'command' — skipping",
-                    name,
+            def _connect_and_discover(server: dict[str, Any]) -> list["BaseTool"]:
+                server_url = server.get("url")
+                server_token = server.get("token")
+                server_headers = _resolve_headers(server.get("headers"))
+                server_command = server.get("command", "")
+                server_args = server.get("args", [])
+
+                if server_url:
+                    transport = StreamableHTTPTransport(
+                        url=server_url,
+                        token=server_token,
+                        headers=server_headers or None,
+                    )
+                elif server_command:
+                    transport = StdioTransport(
+                        command=[server_command] + server_args
+                    )
+                else:
+                    raise ValueError(
+                        f"MCP server '{server.get('name', '<unnamed>')}' has neither "
+                        "'url' nor 'command'"
+                    )
+
+                client = MCPClient(transport)
+                client.initialize()
+                clients.append(client)
+
+                provider = MCPToolProvider(client)
+                discovered = provider.discover()
+
+                include_tools = set(server.get("include_tools", []))
+                exclude_tools = set(server.get("exclude_tools", []))
+                if include_tools:
+                    discovered = [
+                        t for t in discovered if t.spec.name in include_tools
+                    ]
+                if exclude_tools:
+                    discovered = [
+                        t for t in discovered if t.spec.name not in exclude_tools
+                    ]
+                if allowed_names:
+                    discovered = [
+                        t for t in discovered if t.spec.name in allowed_names
+                    ]
+                return discovered
+
+            try:
+                discovered = _connect_and_discover(cfg)
+            except Exception as first_exc:
+                err = str(first_exc)
+                is_composio = (
+                    "composio" in name.lower()
+                    or "tool_router" in str(url or "")
                 )
-                continue
+                if is_composio and "401" in err:
+                    logger.warning(
+                        "Composio MCP server '%s' returned 401 — refreshing session",
+                        name,
+                    )
+                    from openjarvis.tools.mcp_manage import refresh_composio_server_config
 
-            client = MCPClient(transport)
-            client.initialize()
-            clients.append(client)
-
-            provider = MCPToolProvider(client)
-            discovered = provider.discover()
-
-            include_tools = set(cfg.get("include_tools", []))
-            exclude_tools = set(cfg.get("exclude_tools", []))
-            if include_tools:
-                discovered = [t for t in discovered if t.spec.name in include_tools]
-            if exclude_tools:
-                discovered = [t for t in discovered if t.spec.name not in exclude_tools]
-            if allowed_names:
-                discovered = [t for t in discovered if t.spec.name in allowed_names]
+                    refreshed = refresh_composio_server_config(name)
+                    if refreshed:
+                        cfg = refreshed
+                        discovered = _connect_and_discover(cfg)
+                    else:
+                        raise first_exc
+                else:
+                    raise first_exc
 
             tools.extend(discovered)
             logger.info(
@@ -125,7 +199,7 @@ def load_mcp_tools_from_config(
         except Exception as exc:  # per-server isolation
             logger.warning(
                 "Failed to discover MCP tools from '%s': %s",
-                cfg.get("name", "<unnamed>") if "cfg" in locals() else "<unparsed>",
+                cfg.get("name", "<unnamed>") if cfg else "<unparsed>",
                 exc,
             )
             continue

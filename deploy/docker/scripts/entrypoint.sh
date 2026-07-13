@@ -14,9 +14,38 @@ sync_cloud_env_key() {
   fi
 }
 
-for _cloud_var in OPENROUTER_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY NVIDIA_NIM_API_KEY GEMINI_API_KEY GOOGLE_API_KEY MINIMAX_API_KEY; do
+for _cloud_var in OPENROUTER_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY NVIDIA_NIM_API_KEY GEMINI_API_KEY GOOGLE_API_KEY MINIMAX_API_KEY FISH_API_KEY CARTESIA_API_KEY; do
   sync_cloud_env_key "$_cloud_var"
 done
+
+# Export keys from cloud-keys.env so jarvis serve sees FISH_API_KEY etc.
+load_cloud_keys_into_env() {
+  keys_file="/root/.openjarvis/cloud-keys.env"
+  [ -f "$keys_file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+    key="${line%%=*}"
+    val="${line#*=}"
+    key="$(printf '%s' "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -d '\357\273\277')"
+    val="$(printf '%s' "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    case "$key" in
+      ''|*[!A-Za-z0-9_]* ) continue ;;
+    esac
+    [ -n "$key" ] && export "$key=$val"
+  done < "$keys_file"
+}
+load_cloud_keys_into_env
+
+# Ensure Playwright browsers exist (image-baked under /opt/playwright; self-heal if missing).
+PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/opt/playwright}"
+export PLAYWRIGHT_BROWSERS_PATH
+if ! ls "$PLAYWRIGHT_BROWSERS_PATH"/chromium-* >/dev/null 2>&1; then
+  echo "[openjarvis] Playwright Chromium not found in $PLAYWRIGHT_BROWSERS_PATH — installing..."
+  mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
+  playwright install --with-deps chromium
+fi
 
 echo "[openjarvis] Starting MCP SSE bridge on :8888..."
 python /app/deploy/docker/scripts/mcp_sse_server.py &

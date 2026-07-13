@@ -104,3 +104,94 @@ def test_openai_tts_synthesize():
 
     assert result.audio == b"fake-openai-audio"
     assert result.voice_id == "nova"
+
+
+# ---------------------------------------------------------------------------
+# Fish Audio backend tests
+# ---------------------------------------------------------------------------
+
+
+def test_fish_audio_registered():
+    from openjarvis.speech.fish_audio_tts import FishAudioTTSBackend
+
+    TTSRegistry.register_value("fish_audio", FishAudioTTSBackend)
+    assert TTSRegistry.contains("fish_audio")
+
+
+# ---------------------------------------------------------------------------
+# Fallback wrapper tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeTTS:
+    def __init__(self, backend_id, *, fail=False, healthy=True):
+        self.backend_id = backend_id
+        self._fail = fail
+        self._healthy = healthy
+        self.calls = []
+
+    def synthesize(self, text, *, voice_id="", speed=1.0, output_format="mp3"):
+        self.calls.append(voice_id)
+        if self._fail:
+            raise RuntimeError("boom")
+        return TTSResult(
+            audio=b"audio-" + self.backend_id.encode(),
+            format=output_format,
+            voice_id=voice_id,
+            metadata={"backend": self.backend_id},
+        )
+
+    def available_voices(self):
+        return [f"{self.backend_id}-voice"]
+
+    def health(self):
+        return self._healthy
+
+
+def test_fallback_uses_primary_when_healthy():
+    from openjarvis.speech.fallback_tts import FallbackTTSBackend
+
+    primary = _FakeTTS("fish_audio")
+    fallback = _FakeTTS("kokoro")
+    backend = FallbackTTSBackend(primary, fallback, fallback_voice_id="am_michael")
+
+    result = backend.synthesize("Hello", voice_id="ref-123")
+    assert result.audio == b"audio-fish_audio"
+    assert not fallback.calls
+
+
+def test_fallback_on_primary_failure():
+    from openjarvis.speech.fallback_tts import FallbackTTSBackend
+
+    primary = _FakeTTS("fish_audio", fail=True)
+    fallback = _FakeTTS("kokoro")
+    backend = FallbackTTSBackend(primary, fallback, fallback_voice_id="am_michael")
+
+    result = backend.synthesize("Hello", voice_id="ref-123")
+    assert result.audio == b"audio-kokoro"
+    assert result.metadata["fallback_from"] == "fish_audio"
+    # Fallback must use its own voice, not the cloud reference id
+    assert fallback.calls == ["am_michael"]
+
+
+def test_fallback_cooldown_skips_primary():
+    from openjarvis.speech.fallback_tts import FallbackTTSBackend
+
+    primary = _FakeTTS("fish_audio", fail=True)
+    fallback = _FakeTTS("kokoro")
+    backend = FallbackTTSBackend(primary, fallback, fallback_voice_id="am_michael")
+
+    backend.synthesize("one")
+    backend.synthesize("two")
+    # Primary tried once, then skipped during cooldown
+    assert len(primary.calls) == 1
+    assert len(fallback.calls) == 2
+
+
+def test_fallback_health_uses_either():
+    from openjarvis.speech.fallback_tts import FallbackTTSBackend
+
+    primary = _FakeTTS("fish_audio", healthy=False)
+    fallback = _FakeTTS("kokoro", healthy=True)
+    backend = FallbackTTSBackend(primary, fallback)
+    assert backend.health() is True

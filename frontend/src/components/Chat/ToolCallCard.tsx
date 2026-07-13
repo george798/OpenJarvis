@@ -12,6 +12,22 @@ const statusConfig = {
   error: { icon: XCircle, color: 'var(--color-error)' },
 };
 
+/**
+ * Coerce any value to a display string. Tool-call arguments/results should be
+ * strings, but SSE events (and old conversations persisted in localStorage)
+ * can carry plain objects — rendering those as JSX children crashes React
+ * (minified error #31), so stringify defensively.
+ */
+function toText(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
 function previewArgs(raw: string): string {
   if (!raw) return '';
   try {
@@ -35,7 +51,9 @@ export function ToolCallCard({ toolCall }: Props) {
   const [expanded, setExpanded] = useState(false);
   const config = statusConfig[toolCall.status];
   const StatusIcon = config.icon;
-  const preview = previewArgs(toolCall.arguments);
+  const argsText = toText(toolCall.arguments);
+  const resultText = toText(toolCall.result);
+  const preview = previewArgs(argsText);
 
   return (
     <div
@@ -95,7 +113,7 @@ export function ToolCallCard({ toolCall }: Props) {
           className="px-2.5 pb-2 pt-0.5"
           style={{ borderTop: '1px solid var(--color-border-subtle, var(--color-border))' }}
         >
-          {toolCall.arguments && (
+          {argsText && (
             <div className="mt-1.5">
               <div
                 style={{
@@ -120,11 +138,11 @@ export function ToolCallCard({ toolCall }: Props) {
                   wordBreak: 'break-all',
                 }}
               >
-                {formatJson(toolCall.arguments)}
+                {formatJson(argsText)}
               </pre>
             </div>
           )}
-          {toolCall.result && (
+          {resultText && (
             <div className="mt-1.5">
               <div
                 style={{
@@ -149,7 +167,7 @@ export function ToolCallCard({ toolCall }: Props) {
                   wordBreak: 'break-word',
                 }}
               >
-                {toolCall.result}
+                {resultText}
               </pre>
             </div>
           )}

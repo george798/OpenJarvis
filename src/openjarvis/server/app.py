@@ -8,7 +8,11 @@ import time
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
+import os
+
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, Response
 
 from openjarvis.server.analytics_routes import router as analytics_router
 from openjarvis.server.api_routes import include_all_routes
@@ -152,6 +156,7 @@ def create_app(
     config=None,
     memory_backend=None,
     speech_backend=None,
+    tts_backend=None,
     agent_manager=None,
     agent_scheduler=None,
     api_key: str = "",
@@ -222,6 +227,7 @@ def create_app(
     app.state.config = config
     app.state.memory_backend = memory_backend
     app.state.speech_backend = speech_backend
+    app.state.tts_backend = tts_backend
     app.state.agent_manager = agent_manager
     app.state.agent_scheduler = agent_scheduler
     app.state.session_start = time.time()
@@ -353,19 +359,67 @@ def create_app(
                 name="static-assets",
             )
 
+        from openjarvis.server.web_ui_bootstrap import (
+            SW_KILLER_JS,
+            inject_bootstrap,
+        )
+
+        _SW_KILLER_PATHS = frozenset(
+            {
+                "registerSW.js",
+                "sw.js",
+                "workbox-sw.js",
+                "service-worker.js",
+            }
+        )
+
+        @app.get("/fix-ui")
+        async def fix_ui():
+            """One-shot cache wipe for stale PWA bundles (local dev only)."""
+            html = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Fixing OpenJarvis UI…</title></head>
+<body><p>Clearing stale cache and reloading…</p>
+<script>
+(function(){
+  try {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(r){r.forEach(function(x){x.unregister();});});
+    }
+    if ("caches" in window) {
+      caches.keys().then(function(k){k.forEach(function(n){caches.delete(n);});});
+    }
+  } catch(e) {}
+  setTimeout(function(){ location.href = "/"; }, 500);
+})();
+</script></body></html>"""
+            headers = {
+                **_NO_CACHE_HEADERS,
+                "Clear-Site-Data": '"cache", "storage", "executionContexts"',
+            }
+            return HTMLResponse(html, headers=headers)
+
         @app.get("/{full_path:path}")
-        async def spa_catch_all(full_path: str):
+        async def spa_catch_all(full_path: str, request: Request):
             """Serve static files directly, fall back to index.html for SPA routes."""
+            if full_path in _SW_KILLER_PATHS:
+                return Response(
+                    content=SW_KILLER_JS,
+                    media_type="application/javascript",
+                    headers=_NO_CACHE_HEADERS,
+                )
             if full_path:
                 candidate = (static_dir / full_path).resolve()
                 # Path traversal prevention
                 resolved_root = static_dir.resolve()
                 if candidate.is_relative_to(resolved_root) and candidate.is_file():
                     return FileResponse(candidate, headers=_NO_CACHE_HEADERS)
-            return FileResponse(
-                static_dir / "index.html",
-                headers=_NO_CACHE_HEADERS,
-            )
+            index_path = static_dir / "index.html"
+            html = index_path.read_text(encoding="utf-8")
+            api_key = (
+                getattr(request.app.state, "api_key", "")
+                or os.environ.get("OPENJARVIS_API_KEY", "")
+            ).strip()
+            html = inject_bootstrap(html, api_key)
+            return HTMLResponse(html, headers=_NO_CACHE_HEADERS)
 
     return app
 

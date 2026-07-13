@@ -81,7 +81,10 @@ class HttpRequestTool(BaseTool):
         )
 
     def execute(self, **params: Any) -> ToolResult:
-        url = params.get("url", "")
+        # Expand $ENV_VAR references so stored secrets (credential_manage
+        # vault, connector access tokens) can be used without the plaintext
+        # ever passing through model context. Unknown vars are left as-is.
+        url = os.path.expandvars(params.get("url", "") or "")
         if not url:
             return ToolResult(
                 tool_name="http_request",
@@ -114,6 +117,8 @@ class HttpRequestTool(BaseTool):
             for k, v in (params.get("headers") or {}).items()
         }
         body = params.get("body")
+        if isinstance(body, str):
+            body = os.path.expandvars(body)
         timeout = params.get("timeout", 30)
 
         _rust = None

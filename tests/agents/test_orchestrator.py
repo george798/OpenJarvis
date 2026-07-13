@@ -665,3 +665,44 @@ class TestOrchestratorParallelTools:
         )
         result = agent.run("What is 2+2?")
         assert result.content == "The answer is 4."
+
+    def test_empty_response_after_tool_nudges_then_answers(self):
+        """Empty model output after a tool call should nudge a continuation."""
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        engine.generate.side_effect = [
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "name": "calculator",
+                        "arguments": '{"expression":"2+2"}',
+                    }
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+                "model": "test-model",
+                "finish_reason": "tool_calls",
+            },
+            {
+                "content": "",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10},
+                "model": "test-model",
+                "finish_reason": "stop",
+            },
+            {
+                "content": "The answer is 4.",
+                "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
+                "model": "test-model",
+                "finish_reason": "stop",
+            },
+        ]
+        agent = OrchestratorAgent(
+            engine,
+            "test-model",
+            tools=[_CalculatorStub()],
+        )
+        result = agent.run("What is 2+2?")
+        assert result.content == "The answer is 4."
+        assert result.turns == 3
+        assert engine.generate.call_count == 3

@@ -36,12 +36,21 @@ class OllamaEngine(InferenceEngine):
         host: str | None = None,
         *,
         timeout: float = 1800.0,
+        num_ctx: int | None = None,
     ) -> None:
         # Priority: explicit host (from config.toml) > OLLAMA_HOST env var > default
         if host is None:
             env_host = os.environ.get("OLLAMA_HOST")
             host = env_host or self._DEFAULT_HOST
         self._host = host.rstrip("/")
+        # Default context window: explicit arg > OLLAMA_NUM_CTX env > 8192.
+        # Callers can still override per-request via the num_ctx kwarg.
+        if num_ctx is None:
+            try:
+                num_ctx = int(os.environ.get("OLLAMA_NUM_CTX", "8192"))
+            except ValueError:
+                num_ctx = 8192
+        self._num_ctx = num_ctx
         self._client = httpx.Client(base_url=self._host, timeout=timeout)
         # Last stream usage — captured from Ollama's final chunk
         self._last_stream_usage: Dict[str, int] = {}
@@ -73,7 +82,7 @@ class OllamaEngine(InferenceEngine):
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,
-                "num_ctx": kwargs.get("num_ctx", 8192),
+                "num_ctx": kwargs.get("num_ctx", self._num_ctx),
             },
         }
         # Disable extended thinking by default (Qwen3.5 etc.).
@@ -189,7 +198,7 @@ class OllamaEngine(InferenceEngine):
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,
-                "num_ctx": kwargs.get("num_ctx", 8192),
+                "num_ctx": kwargs.get("num_ctx", self._num_ctx),
             },
         }
         # Mirror generate()'s default: disable extended thinking unless the
@@ -268,7 +277,7 @@ class OllamaEngine(InferenceEngine):
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,
-                "num_ctx": kwargs.get("num_ctx", 8192),
+                "num_ctx": kwargs.get("num_ctx", self._num_ctx),
             },
         }
         if "think" not in kwargs:

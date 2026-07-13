@@ -107,9 +107,17 @@ class TestKnowledgeSearchTool:
         assert result.success is False
         assert "No query provided" in result.content
 
-    def test_no_store(self):
-        """Missing store returns success=False."""
+    def test_no_store(self, monkeypatch):
+        """Returns error only when the default knowledge.db cannot be opened."""
         tool = KnowledgeSearchTool()
+
+        def _fail_store():
+            raise OSError("no db")
+
+        monkeypatch.setattr(
+            "openjarvis.tools.knowledge_search.KnowledgeStore",
+            _fail_store,
+        )
         result = tool.execute(query="kubernetes")
         assert result.success is False
         assert "No knowledge store configured" in result.content

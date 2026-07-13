@@ -4,27 +4,20 @@ import type { SpeechState } from '../../hooks/useSpeech';
 interface MicButtonProps {
   state: SpeechState;
   onClick: () => void;
-  disabled?: boolean;
-  reason?: 'not-enabled' | 'no-backend' | 'streaming';
+  voiceAssistant?: boolean;
 }
 
-export function MicButton({ state, onClick, disabled, reason }: MicButtonProps) {
+export function MicButton({ state, onClick, voiceAssistant }: MicButtonProps) {
   const [showTooltip, setShowTooltip] = useState(false);
 
   const tooltipText =
-    reason === 'not-enabled'
-      ? 'Enable in Settings'
-      : reason === 'no-backend'
-        ? 'Speech backend not configured'
-        : reason === 'streaming'
-          ? 'Wait for response'
-          : state === 'recording'
-            ? 'Stop recording'
-            : state === 'transcribing'
-              ? 'Transcribing...'
-              : 'Voice input';
+    state === 'recording'
+      ? voiceAssistant ? 'Stop — send to Jarvis' : 'Stop recording'
+      : state === 'transcribing'
+        ? 'Transcribing...'
+        : voiceAssistant ? 'Talk to Jarvis' : 'Voice input';
 
-  const isInactive = disabled || state === 'transcribing';
+  const isBusy = state === 'transcribing';
 
   return (
     <div
@@ -33,8 +26,10 @@ export function MicButton({ state, onClick, disabled, reason }: MicButtonProps) 
       onMouseLeave={() => setShowTooltip(false)}
     >
       <button
+        type="button"
         onClick={onClick}
-        disabled={isInactive}
+        aria-label={tooltipText}
+        aria-pressed={state === 'recording'}
         className="p-2 rounded-xl transition-all shrink-0"
         style={{
           background: state === 'recording'
@@ -42,11 +37,11 @@ export function MicButton({ state, onClick, disabled, reason }: MicButtonProps) 
             : 'transparent',
           color: state === 'recording'
             ? 'white'
-            : isInactive
+            : isBusy
               ? 'var(--color-text-tertiary)'
               : 'var(--color-text-secondary)',
-          cursor: isInactive ? 'default' : 'pointer',
-          opacity: isInactive ? 0.35 : 1,
+          cursor: isBusy ? 'wait' : 'pointer',
+          opacity: isBusy ? 0.6 : 1,
           animation: state === 'recording' ? 'pulse 1.5s ease-in-out infinite' : 'none',
         }}
       >
@@ -63,9 +58,9 @@ export function MicButton({ state, onClick, disabled, reason }: MicButtonProps) 
           </svg>
         )}
       </button>
-      {showTooltip && isInactive && (
+      {showTooltip && (
         <div
-          className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2.5 py-1.5 rounded-lg text-xs whitespace-nowrap pointer-events-none"
+          className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2.5 py-1.5 rounded-lg text-xs whitespace-nowrap pointer-events-none z-50"
           style={{
             background: 'var(--color-text)',
             color: 'var(--color-bg)',

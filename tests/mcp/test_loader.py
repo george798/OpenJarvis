@@ -102,6 +102,7 @@ class TestLoaderTokenPlumbing:
         _mock_mcp_stack["http"].assert_called_once_with(
             url="http://homeassistant.local:8123/mcp",
             token="ha-llat-secret",
+            headers=None,
         )
 
     def test_no_token_passes_none(self, _mock_mcp_stack):
@@ -116,6 +117,28 @@ class TestLoaderTokenPlumbing:
         _mock_mcp_stack["http"].assert_called_once_with(
             url="http://localhost:9583/mcp",
             token=None,
+            headers=None,
+        )
+
+    def test_headers_passed_to_streamable_http(self, _mock_mcp_stack):
+        """Custom headers (e.g. X-Goog-Api-Key for Stitch) reach the transport."""
+        from openjarvis.mcp.loader import load_mcp_tools_from_config
+
+        cfg = _make_mcp_cfg(
+            enabled=True,
+            servers=[
+                {
+                    "name": "stitch",
+                    "url": "https://stitch.googleapis.com/mcp",
+                    "headers": {"X-Goog-Api-Key": "test-key"},
+                }
+            ],
+        )
+        load_mcp_tools_from_config(cfg)
+        _mock_mcp_stack["http"].assert_called_once_with(
+            url="https://stitch.googleapis.com/mcp",
+            token=None,
+            headers={"X-Goog-Api-Key": "test-key"},
         )
 
     def test_stdio_server_does_not_get_token_kwarg(self, _mock_mcp_stack):

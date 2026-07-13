@@ -20,8 +20,8 @@ from openjarvis.connectors.oauth import (
     delete_tokens,
     load_tokens,
     resolve_google_credentials,
-    run_oauth_flow,
     save_tokens,
+    store_google_app_credentials,
 )
 from openjarvis.core.config import DEFAULT_CONFIG_DIR
 from openjarvis.core.registry import ConnectorRegistry
@@ -203,27 +203,11 @@ class GContactsConnector(BaseConnector):
         # If user pastes client_id:client_secret, store and run OAuth flow
         if ":" in code and ".apps.googleusercontent.com" in code:
             client_id, client_secret = code.split(":", 1)
-            save_tokens(
+            store_google_app_credentials(
+                client_id,
+                client_secret,
                 self._credentials_path,
-                {
-                    "client_id": client_id.strip(),
-                    "client_secret": client_secret.strip(),
-                },
             )
-            import threading
-
-            def _run() -> None:
-                try:
-                    run_oauth_flow(
-                        client_id=client_id.strip(),
-                        client_secret=client_secret.strip(),
-                        scopes=GOOGLE_ALL_SCOPES,
-                        credentials_path=self._credentials_path,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-
-            threading.Thread(target=_run, daemon=True).start()
         else:
             # Raw token or auth code
             save_tokens(self._credentials_path, {"token": code})

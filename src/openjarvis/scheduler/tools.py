@@ -74,6 +74,33 @@ class ScheduleTaskTool(BaseTool):
         prompt = params.get("prompt", "")
         schedule_type = params.get("schedule_type", "")
         schedule_value = params.get("schedule_value", "")
+
+        # Hermes-style natural language: schedule_value can be English
+        if schedule_type == "natural" or (
+            schedule_type and not schedule_value and " " in schedule_type
+        ):
+            schedule_value = schedule_type
+            schedule_type = "natural"
+        if schedule_type == "natural" or (
+            not schedule_type and schedule_value and "every" in schedule_value.lower()
+        ):
+            from openjarvis.hermes.schedule_nl import parse_natural_schedule
+
+            parsed = parse_natural_schedule(schedule_value or schedule_type)
+            if parsed is None:
+                return ToolResult(
+                    tool_name="schedule_task",
+                    content=f"Could not parse schedule: {schedule_value or schedule_type}",
+                    success=False,
+                )
+            schedule_type = parsed.schedule_type
+            schedule_value = parsed.schedule_value
+
+        metadata: dict[str, Any] = {}
+        for key in ("deliver_to", "deliver_recipient", "no_agent"):
+            if params.get(key) is not None:
+                metadata[key] = params.get(key)
+
         if not prompt or not schedule_type or not schedule_value:
             return ToolResult(
                 tool_name="schedule_task",
@@ -90,6 +117,7 @@ class ScheduleTaskTool(BaseTool):
                 schedule_value=schedule_value,
                 agent=params.get("agent", "simple"),
                 tools=params.get("tools", ""),
+                metadata=metadata,
             )
             return ToolResult(
                 tool_name="schedule_task",

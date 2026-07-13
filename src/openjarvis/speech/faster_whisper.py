@@ -25,10 +25,19 @@ class FasterWhisperBackend(SpeechBackend):
         model_size: str = "base",
         device: str = "auto",
         compute_type: str = "float16",
+        *,
+        default_language: str = "",
+        beam_size: int = 5,
+        vad_filter: bool = True,
+        initial_prompt: str = "",
     ) -> None:
         self._model_size = model_size
         self._device = device
         self._compute_type = compute_type
+        self._default_language = default_language.strip()
+        self._beam_size = max(1, beam_size)
+        self._vad_filter = vad_filter
+        self._initial_prompt = initial_prompt.strip()
         self._model: Optional[WhisperModel] = None
 
     def _ensure_model(self) -> WhisperModel:
@@ -62,9 +71,17 @@ class FasterWhisperBackend(SpeechBackend):
             tmp.write(audio)
             tmp.flush()
 
-            kwargs = {}
-            if language:
-                kwargs["language"] = language
+            lang = (language or self._default_language or "").strip() or None
+            kwargs: dict = {
+                "beam_size": self._beam_size,
+                "vad_filter": self._vad_filter,
+                # Short voice commands — avoid hallucinated continuations.
+                "condition_on_previous_text": False,
+            }
+            if lang:
+                kwargs["language"] = lang
+            if self._initial_prompt:
+                kwargs["initial_prompt"] = self._initial_prompt
 
             segments_iter, info = model.transcribe(tmp.name, **kwargs)
             segments_list = list(segments_iter)

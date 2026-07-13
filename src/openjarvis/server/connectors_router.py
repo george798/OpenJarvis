@@ -5,6 +5,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
+try:
+    from starlette.requests import Request
+except ImportError:  # pragma: no cover - optional server deps
+    Request = Any  # type: ignore[misc,assignment]
+
 logger = logging.getLogger(__name__)
 
 # Module-level cache of connector instances (keyed by connector_id).
@@ -78,7 +83,7 @@ def create_connectors_router():
     this package.
     """
     try:
-        from fastapi import APIRouter, HTTPException, Request
+        from fastapi import APIRouter, HTTPException
     except ImportError as exc:
         raise ImportError(
             "fastapi and pydantic are required for the connectors router"
@@ -102,20 +107,28 @@ def create_connectors_router():
             _instances[connector_id] = cls()
         return _instances[connector_id]
 
-    def _connector_summary(connector_id: str, instance: Any) -> Dict[str, Any]:
-        """Build the dict returned by GET /connectors."""
-        chunks = 0
+    def _chunk_counts_by_source() -> Dict[str, int]:
+        """One query for all connector chunk counts (avoids N SQLite opens)."""
         try:
             from openjarvis.connectors.store import KnowledgeStore
 
             with KnowledgeStore() as store:
                 rows = store._conn.execute(
-                    "SELECT COUNT(*) FROM knowledge_chunks WHERE source = ?",
-                    (connector_id,),
-                ).fetchone()
-                chunks = rows[0] if rows else 0
+                    "SELECT source, COUNT(*) FROM knowledge_chunks GROUP BY source",
+                ).fetchall()
+            return {str(source): int(count) for source, count in rows}
         except Exception:
-            pass
+            return {}
+
+    def _connector_summary(
+        connector_id: str,
+        instance: Any,
+        *,
+        chunk_counts: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        """Build the dict returned by GET /connectors."""
+        counts = chunk_counts if chunk_counts is not None else _chunk_counts_by_source()
+        chunks = counts.get(connector_id, 0)
 
         return {
             "connector_id": connector_id,
@@ -222,11 +235,14 @@ def create_connectors_router():
     async def list_connectors():
         """List all registered connectors with their connection status."""
         _ensure_connectors_registered()
+        chunk_counts = _chunk_counts_by_source()
         results = []
         for key in sorted(ConnectorRegistry.keys()):
             try:
                 instance = _get_or_create(key)
-                results.append(_connector_summary(key, instance))
+                results.append(
+                    _connector_summary(key, instance, chunk_counts=chunk_counts)
+                )
             except Exception:
                 results.append(
                     {
@@ -433,9 +449,9 @@ def create_connectors_router():
     @router.get("/{connector_id}/oauth/callback")
     async def oauth_callback(
         connector_id: str,
+        request: Request,
         code: str = "",
         error: str = "",
-        request: Request = None,
     ):
         """Handle OAuth callback from the provider."""
         from fastapi.responses import HTMLResponse

@@ -43,6 +43,7 @@ class SessionStore:
                 conversation_history         TEXT    NOT NULL DEFAULT '[]',
                 preferred_notification_channel TEXT,
                 pending_response             TEXT,
+                metadata                     TEXT    NOT NULL DEFAULT '{}',
                 created_at                   TIMESTAMP DEFAULT (datetime('now')),
                 updated_at                   TIMESTAMP DEFAULT (datetime('now')),
                 PRIMARY KEY (sender_id, channel_type)
@@ -52,6 +53,19 @@ class SessionStore:
             """
         )
         self._db.commit()
+        self._ensure_metadata_column()
+
+    def _ensure_metadata_column(self) -> None:
+        cols = {
+            row[1]
+            for row in self._db.execute("PRAGMA table_info(channel_sessions)").fetchall()
+        }
+        if "metadata" not in cols:
+            self._db.execute(
+                "ALTER TABLE channel_sessions "
+                "ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'"
+            )
+            self._db.commit()
 
     # ------------------------------------------------------------------
     # Public API
@@ -74,6 +88,7 @@ class SessionStore:
                 "conversation_history": [],
                 "preferred_notification_channel": None,
                 "pending_response": None,
+                "metadata": {},
             }
         return {
             "sender_id": row["sender_id"],
@@ -81,6 +96,7 @@ class SessionStore:
             "conversation_history": json.loads(row["conversation_history"]),
             "preferred_notification_channel": row["preferred_notification_channel"],
             "pending_response": row["pending_response"],
+            "metadata": json.loads(row["metadata"] or "{}"),
         }
 
     def append_message(
@@ -172,6 +188,23 @@ class SessionStore:
             "WHERE preferred_notification_channel IS NOT NULL"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def set_session_metadata(
+        self,
+        sender_id: str,
+        channel_type: str,
+        patch: Dict[str, Any],
+    ) -> None:
+        session = self.get_or_create(sender_id, channel_type)
+        metadata = dict(session.get("metadata") or {})
+        metadata.update(patch)
+        self._db.execute(
+            "UPDATE channel_sessions "
+            "SET metadata = ?, updated_at = datetime('now') "
+            "WHERE sender_id = ? AND channel_type = ?",
+            (json.dumps(metadata), sender_id, channel_type),
+        )
+        self._db.commit()
 
     def close(self) -> None:
         self._db.close()

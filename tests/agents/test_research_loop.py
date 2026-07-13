@@ -13,14 +13,17 @@ from unittest.mock import MagicMock
 import pytest
 
 from openjarvis.agents.research_loop import (
+    DEFAULT_PLANNER_MODEL,
     SEARCH_TOOL_SPEC,
     SYSTEM_PROMPT,
     ResearchAgent,
     _hit_url,
     build_sources_for_client,
     renumber_citations,
+    resolve_planner_model,
     shape_results_for_model,
 )
+from openjarvis.core.config import JarvisConfig
 from openjarvis.connectors.hybrid_search import SearchHit
 
 
@@ -609,3 +612,21 @@ def test_final_answer_event_carries_renumbered_sources(
     # Two cited sources, in the order they appeared in the synthesis.
     assert [s["ref"] for s in final["sources"]] == [1, 2]
     assert [s["title"] for s in final["sources"]] == ["B", "A"]
+
+
+def test_resolve_planner_model_uses_override() -> None:
+    cfg = JarvisConfig()
+    cfg.agent.research_model = "from-config"
+    assert resolve_planner_model("from-cli", cfg) == "from-cli"
+
+
+def test_resolve_planner_model_uses_config() -> None:
+    cfg = JarvisConfig()
+    cfg.agent.research_model = "gemma4:latest"
+    assert resolve_planner_model(None, cfg) == "gemma4:latest"
+
+
+def test_resolve_planner_model_falls_back_to_default() -> None:
+    cfg = JarvisConfig()
+    assert resolve_planner_model(None, cfg) == DEFAULT_PLANNER_MODEL
+    assert DEFAULT_PLANNER_MODEL == "gemma4:latest"

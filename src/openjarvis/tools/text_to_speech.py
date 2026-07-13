@@ -39,7 +39,10 @@ class TextToSpeechTool(BaseTool):
                     },
                     "backend": {
                         "type": "string",
-                        "description": "TTS backend (cartesia, kokoro, openai_tts).",
+                        "description": (
+                            "TTS backend (fish_audio, kokoro, cartesia, "
+                            "openai_tts). Defaults to the configured backend."
+                        ),
                     },
                     "output_dir": {
                         "type": "string",
@@ -58,8 +61,8 @@ class TextToSpeechTool(BaseTool):
 
         text = params.get("text", "")
         voice_id = params.get("voice_id", "")
-        backend_key = params.get("backend", "cartesia")
-        _ALIASES = {"openai": "openai_tts"}
+        backend_key = params.get("backend", "")
+        _ALIASES = {"openai": "openai_tts", "fish": "fish_audio"}
         backend_key = _ALIASES.get(backend_key, backend_key)
         output_dir = params.get("output_dir", "")
         speed = float(params.get("speed", 1.0))
@@ -71,15 +74,30 @@ class TextToSpeechTool(BaseTool):
                 success=False,
             )
 
-        if not TTSRegistry.contains(backend_key):
-            return ToolResult(
-                tool_name="text_to_speech",
-                content=f"TTS backend '{backend_key}' not available.",
-                success=False,
-            )
+        backend = None
+        if not backend_key:
+            # No explicit backend — use the configured one (fish_audio /
+            # kokoro / …), which comes wrapped with a local Kokoro fallback
+            # for cloud backends.
+            try:
+                from openjarvis.core.config import load_config
+                from openjarvis.speech._tts_discovery import get_tts_backend
 
-        backend_cls = TTSRegistry.get(backend_key)
-        backend = backend_cls()
+                backend = get_tts_backend(load_config())
+            except Exception:
+                backend = None
+            if backend is None:
+                backend_key = "kokoro"
+
+        if backend is None:
+            if not TTSRegistry.contains(backend_key):
+                return ToolResult(
+                    tool_name="text_to_speech",
+                    content=f"TTS backend '{backend_key}' not available.",
+                    success=False,
+                )
+            backend_cls = TTSRegistry.get(backend_key)
+            backend = backend_cls()
 
         result = backend.synthesize(text, voice_id=voice_id, speed=speed)
 
@@ -103,6 +121,13 @@ class TextToSpeechTool(BaseTool):
                 "format": ext,
                 "duration_seconds": result.duration_seconds,
                 "voice_id": result.voice_id,
-                "backend": backend_key,
+                "backend": result.metadata.get("backend")
+                or backend_key
+                or getattr(backend, "backend_id", ""),
+                **(
+                    {"fallback_from": result.metadata["fallback_from"]}
+                    if "fallback_from" in result.metadata
+                    else {}
+                ),
             },
         )

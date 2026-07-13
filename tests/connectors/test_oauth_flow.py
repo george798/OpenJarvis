@@ -30,19 +30,19 @@ def test_exchange_google_token_calls_endpoint() -> None:
     mock_post.assert_called_once()
 
 
-def test_gdrive_handle_callback_triggers_oauth(tmp_path: Path) -> None:
+def test_gdrive_handle_callback_stores_app_credentials(tmp_path: Path) -> None:
     from openjarvis.connectors.gdrive import GDriveConnector
+    from openjarvis.connectors.oauth import load_tokens
 
     creds = str(tmp_path / "gdrive.json")
     conn = GDriveConnector(credentials_path=creds)
 
-    with patch("openjarvis.connectors.gdrive.run_oauth_flow") as mock_flow:
-        mock_flow.return_value = {"access_token": "ya29.test"}
-        conn.handle_callback("test-id.apps.googleusercontent.com:test-secret")
+    conn.handle_callback("test-id.apps.googleusercontent.com:test-secret")
 
-    mock_flow.assert_called_once()
-    call_kwargs = mock_flow.call_args
-    assert "test-id.apps.googleusercontent.com" in str(call_kwargs)
+    tokens = load_tokens(creds)
+    assert tokens is not None
+    assert tokens["client_id"] == "test-id.apps.googleusercontent.com"
+    assert tokens["client_secret"] == "test-secret"
 
 
 def test_gdrive_is_connected_requires_access_token(tmp_path: Path) -> None:
@@ -61,44 +61,30 @@ def test_gdrive_is_connected_requires_access_token(tmp_path: Path) -> None:
     assert conn.is_connected() is True
 
 
-def test_gcalendar_handle_callback_triggers_oauth(tmp_path: Path) -> None:
+def test_gcalendar_handle_callback_stores_app_credentials(tmp_path: Path) -> None:
     from openjarvis.connectors.gcalendar import GCalendarConnector
+    from openjarvis.connectors.oauth import load_tokens
 
     creds = str(tmp_path / "gcalendar.json")
     conn = GCalendarConnector(credentials_path=creds)
 
-    with patch("openjarvis.connectors.gcalendar.run_oauth_flow") as mock_flow:
-        mock_flow.return_value = {"access_token": "ya29.test"}
-        conn.handle_callback("test-id.apps.googleusercontent.com:test-secret")
+    conn.handle_callback("test-id.apps.googleusercontent.com:test-secret")
 
-    mock_flow.assert_called_once()
+    tokens = load_tokens(creds)
+    assert tokens is not None
+    assert tokens["client_id"] == "test-id.apps.googleusercontent.com"
+    assert tokens["client_secret"] == "test-secret"
 
 
-def test_gcontacts_handle_callback_triggers_oauth(tmp_path: Path) -> None:
+def test_gcontacts_handle_callback_stores_app_credentials(tmp_path: Path) -> None:
     from openjarvis.connectors.gcontacts import GContactsConnector
+    from openjarvis.connectors.oauth import load_tokens
 
     creds = str(tmp_path / "gcontacts.json")
     conn = GContactsConnector(credentials_path=creds)
 
-    with patch("openjarvis.connectors.gcontacts.run_oauth_flow") as mock_flow:
-        mock_flow.return_value = {"access_token": "ya29.test"}
-        conn.handle_callback("test-id.apps.googleusercontent.com:test-secret")
+    conn.handle_callback("test-id.apps.googleusercontent.com:test-secret")
 
-    mock_flow.assert_called_once()
-
-
-def test_gdrive_handle_callback_fallback_on_failure(tmp_path: Path) -> None:
-    from openjarvis.connectors.gdrive import GDriveConnector
-    from openjarvis.connectors.oauth import load_tokens
-
-    creds = str(tmp_path / "gdrive.json")
-    conn = GDriveConnector(credentials_path=creds)
-
-    with patch("openjarvis.connectors.gdrive.run_oauth_flow") as mock_flow:
-        mock_flow.side_effect = RuntimeError("OAuth failed")
-        conn.handle_callback("test-id.apps.googleusercontent.com:test-secret")
-
-    # Should have saved client_id and client_secret as fallback
     tokens = load_tokens(creds)
     assert tokens is not None
     assert tokens["client_id"] == "test-id.apps.googleusercontent.com"

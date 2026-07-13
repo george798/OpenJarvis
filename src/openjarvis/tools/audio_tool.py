@@ -19,7 +19,7 @@ class AudioTranscribeTool(BaseTool):
     """Transcribe audio files using OpenAI Whisper or a local provider."""
 
     tool_id = "audio_transcribe"
-    is_local = False
+    is_local = True
 
     @property
     def spec(self) -> ToolSpec:
@@ -43,8 +43,8 @@ class AudioTranscribeTool(BaseTool):
                     "provider": {
                         "type": "string",
                         "description": (
-                            "Transcription provider: 'openai' or 'local'."
-                            " Default 'openai'."
+                            "Transcription provider: 'local' (faster-whisper,"
+                            " offline, default) or 'openai' (cloud)."
                         ),
                     },
                 },
@@ -104,15 +104,11 @@ class AudioTranscribeTool(BaseTool):
                 success=False,
             )
 
-        provider = params.get("provider", "openai")
+        provider = params.get("provider", "local")
         language = params.get("language")
 
         if provider == "local":
-            return ToolResult(
-                tool_name="audio_transcribe",
-                content="Local transcription provider is not yet implemented.",
-                success=False,
-            )
+            return self._transcribe_local(path, language)
 
         if provider != "openai":
             return ToolResult(
@@ -123,6 +119,63 @@ class AudioTranscribeTool(BaseTool):
                 success=False,
             )
 
+        return self._transcribe_openai(path, provider, language, file_path)
+
+    def _transcribe_local(self, path: Path, language: Any) -> ToolResult:
+        """Transcribe with the configured local STT backend (faster-whisper)."""
+        try:
+            from openjarvis.core.config import load_config
+            from openjarvis.speech._discovery import get_speech_backend
+
+            config = load_config()
+            backend = get_speech_backend(config)
+        except Exception:
+            backend = None
+        if backend is None:
+            try:
+                from openjarvis.speech.faster_whisper import FasterWhisperBackend
+
+                backend = FasterWhisperBackend(model_size="small", device="auto")
+            except Exception as exc:
+                return ToolResult(
+                    tool_name="audio_transcribe",
+                    content=f"No local STT backend available: {exc}",
+                    success=False,
+                )
+
+        try:
+            audio_bytes = path.read_bytes()
+            result = backend.transcribe(
+                audio_bytes,
+                format=path.suffix.lstrip("."),
+                language=language or None,
+            )
+        except Exception as exc:
+            return ToolResult(
+                tool_name="audio_transcribe",
+                content=f"Local transcription error: {exc}",
+                success=False,
+            )
+
+        metadata: dict[str, Any] = {
+            "file_path": str(path.resolve()),
+            "provider": "local",
+        }
+        if result.language:
+            metadata["language"] = result.language
+        if result.duration_seconds:
+            metadata["duration_ms"] = int(result.duration_seconds * 1000)
+
+        return ToolResult(
+            tool_name="audio_transcribe",
+            content=result.text,
+            success=True,
+            metadata=metadata,
+        )
+
+    def _transcribe_openai(
+        self, path: Path, provider: str, language: Any, file_path: str
+    ) -> ToolResult:
         # OpenAI Whisper provider
         try:
             import openai
