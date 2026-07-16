@@ -35,6 +35,9 @@ class TestAgentCRUD:
         assert agent["name"] == "researcher"
         assert agent["agent_type"] == "monitor_operative"
         assert agent["status"] == "idle"
+        assert agent["schedule_type"] == "cron"
+        assert agent["schedule_value"] == "0 9 * * *"
+        assert agent["config"]["schedule_type"] == "cron"
 
     def test_list_agents(self, manager):
         manager.create_agent(name="agent1", agent_type="simple")

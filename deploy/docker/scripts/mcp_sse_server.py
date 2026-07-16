@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 import uvicorn
@@ -49,6 +50,19 @@ _internal = MCPServer()
 _mcp = Server("openjarvis")
 _sse = SseServerTransport("/messages/")
 
+# Optional whitelist for the external MCP surface. When OPENJARVIS_MCP_TOOLS
+# is set (comma-separated tool names), only those tools are listed and
+# callable over SSE — external agents like Cursor/OpenCode get a slim
+# context-provider API instead of the full ~65-tool set. Unset = all tools.
+_raw_whitelist = os.environ.get("OPENJARVIS_MCP_TOOLS", "").strip()
+_TOOL_WHITELIST: set[str] | None = (
+    {name.strip() for name in _raw_whitelist.split(",") if name.strip()}
+    if _raw_whitelist
+    else None
+)
+if _TOOL_WHITELIST:
+    logger.info("MCP tool whitelist active: %s", sorted(_TOOL_WHITELIST))
+
 
 def _call_internal(method: str, params: dict[str, Any] | None, req_id: int | str) -> Any:
     request = MCPRequest(method=method, params=params or {}, id=req_id)
@@ -63,6 +77,8 @@ async def list_tools() -> list[Tool]:
     result = _call_internal("tools/list", {}, 1)
     tools: list[Tool] = []
     for spec in result.get("tools", []):
+        if _TOOL_WHITELIST is not None and spec["name"] not in _TOOL_WHITELIST:
+            continue
         tools.append(
             Tool(
                 name=spec["name"],
@@ -75,6 +91,13 @@ async def list_tools() -> list[Tool]:
 
 @_mcp.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+    if _TOOL_WHITELIST is not None and name not in _TOOL_WHITELIST:
+        return [
+            TextContent(
+                type="text",
+                text=f"Tool '{name}' is not exposed on this MCP endpoint.",
+            )
+        ]
     result = _call_internal(
         "tools/call",
         {"name": name, "arguments": arguments},

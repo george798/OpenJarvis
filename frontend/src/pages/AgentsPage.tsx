@@ -182,6 +182,254 @@ function formatSchedule(type?: string, value?: string): string {
   return type || 'Manual';
 }
 
+function defaultScheduleValue(type: string): string {
+  switch (type) {
+    case 'daily':
+      return '0 9 * * *';
+    case 'weekly':
+      return '0 9 * * 1';
+    case 'hourly':
+      return '3600';
+    case 'cron':
+      return '0 9 * * *';
+    default:
+      return '';
+  }
+}
+
+function apiScheduleFromUi(
+  type: string,
+  value: string,
+): { schedule_type: string; schedule_value: string | undefined } {
+  if (type === 'manual') {
+    return { schedule_type: 'manual', schedule_value: undefined };
+  }
+  const resolved = value || defaultScheduleValue(type);
+  if (type === 'daily' || type === 'weekly' || type === 'cron') {
+    return { schedule_type: 'cron', schedule_value: resolved || undefined };
+  }
+  if (type === 'hourly') {
+    return { schedule_type: 'interval', schedule_value: resolved || '3600' };
+  }
+  return { schedule_type: type, schedule_value: resolved || undefined };
+}
+
+function uiScheduleFromApi(
+  type?: string,
+  value?: string,
+): { scheduleType: string; scheduleValue: string } {
+  if (!type || type === 'manual') {
+    return { scheduleType: 'manual', scheduleValue: '' };
+  }
+  if (type === 'interval') {
+    return { scheduleType: 'hourly', scheduleValue: value || '3600' };
+  }
+  if (type === 'cron' && value) {
+    const parts = value.trim().split(/\s+/);
+    if (parts.length === 5) {
+      const [, , , , dow] = parts;
+      if (dow === '*') return { scheduleType: 'daily', scheduleValue: value };
+      if (dow !== '*') return { scheduleType: 'weekly', scheduleValue: value };
+    }
+    return { scheduleType: 'cron', scheduleValue: value };
+  }
+  return { scheduleType: type, scheduleValue: value || '' };
+}
+
+function ScheduleFields({
+  scheduleType,
+  scheduleValue,
+  onChange,
+  compact = false,
+}: {
+  scheduleType: string;
+  scheduleValue: string;
+  onChange: (next: { scheduleType: string; scheduleValue: string }) => void;
+  compact?: boolean;
+}) {
+  const selectClass = compact
+    ? 'w-full px-2 py-1 rounded text-xs'
+    : 'w-full px-3 py-2 rounded-lg text-sm';
+  const subSelectClass = compact
+    ? 'w-full px-2 py-1 rounded text-xs mt-1.5'
+    : 'w-full px-3 py-1.5 rounded-lg text-xs mt-1.5';
+  const inputClass = compact
+    ? 'w-14 px-2 py-1 rounded text-xs text-center'
+    : 'w-14 px-2 py-1 rounded text-xs text-center';
+  const labelClass = compact
+    ? 'block text-xs mb-1'
+    : 'block text-sm font-medium mb-1';
+
+  function setType(nextType: string) {
+    onChange({
+      scheduleType: nextType,
+      scheduleValue:
+        nextType === 'manual'
+          ? ''
+          : scheduleValue || defaultScheduleValue(nextType),
+    });
+  }
+
+  return (
+    <div>
+      <label className={labelClass} style={{ color: 'var(--color-text-secondary)' }}>
+        Schedule
+      </label>
+      <select
+        value={scheduleType}
+        onChange={(e) => setType(e.target.value)}
+        className={selectClass}
+        style={{
+          background: compact ? 'var(--color-bg)' : 'var(--color-bg-secondary)',
+          border: '1px solid var(--color-border)',
+          color: 'var(--color-text)',
+        }}
+      >
+        <option value="manual">Manual (run on demand)</option>
+        <option value="daily">Daily</option>
+        <option value="weekly">Weekly</option>
+        <option value="hourly">Every N hours</option>
+        <option value="cron">Custom (cron expression)</option>
+      </select>
+      {scheduleType === 'daily' && (
+        <select
+          value={(() => {
+            const m = scheduleValue.match(/^0\s+(\d+)\s/);
+            return m ? m[1] : '9';
+          })()}
+          onChange={(e) =>
+            onChange({ scheduleType, scheduleValue: `0 ${e.target.value} * * *` })
+          }
+          className={subSelectClass}
+          style={{
+            background: 'var(--color-bg)',
+            border: '1px solid var(--color-border)',
+            color: 'var(--color-text)',
+          }}
+        >
+          {Array.from({ length: 24 }, (_, i) => {
+            const label =
+              i === 0 ? '12 AM' : i < 12 ? `${i} AM` : i === 12 ? '12 PM' : `${i - 12} PM`;
+            return (
+              <option key={i} value={String(i)}>
+                {label}
+              </option>
+            );
+          })}
+        </select>
+      )}
+      {scheduleType === 'weekly' && (
+        <div className="mt-1.5 space-y-1.5">
+          <div className="flex gap-1">
+            {(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const).map((day, idx) => {
+              const dayNum = String(idx + 1);
+              const cronParts = scheduleValue.match(/\*\s+\*\s+(.+)$/);
+              const selectedDays = cronParts ? cronParts[1].split(',') : [];
+              const isSelected = selectedDays.includes(dayNum);
+              return (
+                <button
+                  key={day}
+                  type="button"
+                  onClick={() => {
+                    const newDays = isSelected
+                      ? selectedDays.filter((d) => d !== dayNum)
+                      : [...selectedDays, dayNum].sort();
+                    const hourMatch = scheduleValue.match(/^0\s+(\d+)\s/);
+                    const hour = hourMatch ? hourMatch[1] : '9';
+                    onChange({
+                      scheduleType,
+                      scheduleValue:
+                        newDays.length > 0
+                          ? `0 ${hour} * * ${newDays.join(',')}`
+                          : defaultScheduleValue('weekly'),
+                    });
+                  }}
+                  className="px-1.5 py-1 rounded text-xs font-medium"
+                  style={{
+                    background: isSelected ? 'var(--color-accent)' : 'var(--color-bg)',
+                    color: isSelected ? 'var(--color-on-accent)' : 'var(--color-text-tertiary)',
+                    border: `1px solid ${isSelected ? 'var(--color-accent)' : 'var(--color-border)'}`,
+                  }}
+                >
+                  {day}
+                </button>
+              );
+            })}
+          </div>
+          <select
+            value={(() => {
+              const m = scheduleValue.match(/^0\s+(\d+)\s/);
+              return m ? m[1] : '9';
+            })()}
+            onChange={(e) => {
+              const cronParts = scheduleValue.match(/\*\s+\*\s+(.+)$/);
+              const days = cronParts ? cronParts[1] : '1';
+              onChange({
+                scheduleType,
+                scheduleValue: `0 ${e.target.value} * * ${days}`,
+              });
+            }}
+            className={subSelectClass}
+            style={{
+              background: 'var(--color-bg)',
+              border: '1px solid var(--color-border)',
+              color: 'var(--color-text)',
+            }}
+          >
+            {Array.from({ length: 24 }, (_, i) => {
+              const label =
+                i === 0 ? '12 AM' : i < 12 ? `${i} AM` : i === 12 ? '12 PM' : `${i - 12} PM`;
+              return (
+                <option key={i} value={String(i)}>
+                  {label}
+                </option>
+              );
+            })}
+          </select>
+        </div>
+      )}
+      {scheduleType === 'hourly' && (
+        <div className="flex items-center gap-2 mt-1.5">
+          <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+            Every
+          </span>
+          <input
+            type="number"
+            min="1"
+            max="24"
+            value={(() => {
+              const secs = parseInt(scheduleValue || '0', 10);
+              return secs > 0 ? Math.round(secs / 3600) : 1;
+            })()}
+            onChange={(e) => {
+              const hrs = Math.min(24, Math.max(1, parseInt(e.target.value, 10) || 1));
+              onChange({ scheduleType, scheduleValue: String(hrs * 3600) });
+            }}
+            className={inputClass}
+            style={{
+              background: 'var(--color-bg)',
+              border: '1px solid var(--color-border)',
+              color: 'var(--color-text)',
+            }}
+          />
+          <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+            hours
+          </span>
+        </div>
+      )}
+      {scheduleType === 'cron' && (
+        <input
+          value={scheduleValue}
+          onChange={(e) => onChange({ scheduleType, scheduleValue: e.target.value })}
+          placeholder="0 9 * * *"
+          className={`${subSelectClass} bg-transparent`}
+          style={{ border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
+        />
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Launch Wizard
 // ---------------------------------------------------------------------------
@@ -686,6 +934,10 @@ function LaunchWizard({
 
   function selectTemplate(tpl: AgentTemplate | null) {
     if (tpl) {
+      const tplSchedule = uiScheduleFromApi(
+        (tpl as any).schedule_type,
+        (tpl as any).schedule_value,
+      );
       setWizard((w) => ({
         ...w,
         step: 2,
@@ -694,8 +946,8 @@ function LaunchWizard({
         name: '',
         instruction: (tpl as any).instruction || TEMPLATE_INSTRUCTIONS[tpl.id] || '',
         model: recommendedModel || w.model,
-        scheduleType: (tpl as any).schedule_type || 'manual',
-        scheduleValue: (tpl as any).schedule_value || '',
+        scheduleType: tplSchedule.scheduleType,
+        scheduleValue: tplSchedule.scheduleValue || defaultScheduleValue(tplSchedule.scheduleType),
         selectedTools: (tpl as any).tools || [],
         memoryExtraction: (tpl as any).memory_extraction || UNIVERSAL_DEFAULTS.memoryExtraction,
         observationCompression: (tpl as any).observation_compression || UNIVERSAL_DEFAULTS.observationCompression,
@@ -723,22 +975,24 @@ function LaunchWizard({
 
   async function handleLaunch() {
     if (!wizard.name.trim()) { toast.error('Name is required'); return; }
+    if (
+      wizard.scheduleType !== 'manual' &&
+      !wizard.scheduleValue &&
+      !defaultScheduleValue(wizard.scheduleType)
+    ) {
+      toast.error('Schedule value is required');
+      return;
+    }
     setLaunching(true);
     try {
-      // Map friendly schedule presets to API schedule_type/schedule_value
-      let apiScheduleType = wizard.scheduleType;
-      let apiScheduleValue = wizard.scheduleValue;
-      if (wizard.scheduleType === 'daily' || wizard.scheduleType === 'weekly') {
-        apiScheduleType = 'cron';
-        // scheduleValue already holds the cron expression
-      } else if (wizard.scheduleType === 'hourly') {
-        apiScheduleType = 'interval';
-        // scheduleValue already holds seconds as string
-      }
+      const { schedule_type, schedule_value } = apiScheduleFromUi(
+        wizard.scheduleType,
+        wizard.scheduleValue,
+      );
 
       const config: Record<string, unknown> = {
-        schedule_type: apiScheduleType,
-        schedule_value: apiScheduleValue || undefined,
+        schedule_type,
+        schedule_value,
         tools: wizard.selectedTools,
         learning_enabled: !!wizard.routerPolicy,
         memory_extraction: wizard.memoryExtraction,
@@ -905,106 +1159,11 @@ function LaunchWizard({
                 ))}
               </select>
             </div>
-            <div>
-              <label className="block text-sm font-medium mb-1" style={{ color: 'var(--color-text-secondary)' }}>Schedule</label>
-              <select
-                value={wizard.scheduleType}
-                onChange={(e) => setWizard((w) => ({ ...w, scheduleType: e.target.value, scheduleValue: e.target.value === 'manual' ? '' : w.scheduleValue }))}
-                className="w-full px-3 py-2 rounded-lg text-sm"
-                style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-              >
-                <option value="manual">Manual (run on demand)</option>
-                <option value="daily">Daily</option>
-                <option value="weekly">Weekly</option>
-                <option value="hourly">Every N hours</option>
-                <option value="cron">Custom (cron expression)</option>
-              </select>
-              {wizard.scheduleType === 'daily' && (
-                <select
-                  value={(() => { const m = wizard.scheduleValue.match(/^0\s+(\d+)\s/); return m ? m[1] : '9'; })()}
-                  onChange={(e) => setWizard((w) => ({ ...w, scheduleValue: `0 ${e.target.value} * * *` }))}
-                  className="w-full px-3 py-1.5 rounded-lg text-xs mt-1.5"
-                  style={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-                >
-                  {Array.from({ length: 24 }, (_, i) => {
-                    const label = i === 0 ? '12 AM' : i < 12 ? `${i} AM` : i === 12 ? '12 PM' : `${i - 12} PM`;
-                    return <option key={i} value={String(i)}>{label}</option>;
-                  })}
-                </select>
-              )}
-              {wizard.scheduleType === 'weekly' && (
-                <div className="mt-1.5 space-y-1.5">
-                  <div className="flex gap-1">
-                    {(['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] as const).map((day, idx) => {
-                      const dayNum = String(idx + 1);
-                      const cronParts = wizard.scheduleValue.match(/\*\s+\*\s+(.+)$/);
-                      const selectedDays = cronParts ? cronParts[1].split(',') : [];
-                      const isSelected = selectedDays.includes(dayNum);
-                      return (
-                        <button
-                          key={day}
-                          type="button"
-                          onClick={() => {
-                            const newDays = isSelected ? selectedDays.filter(d => d !== dayNum) : [...selectedDays, dayNum].sort();
-                            const hourMatch = wizard.scheduleValue.match(/^0\s+(\d+)\s/);
-                            const hour = hourMatch ? hourMatch[1] : '9';
-                            setWizard((w) => ({ ...w, scheduleValue: newDays.length > 0 ? `0 ${hour} * * ${newDays.join(',')}` : '' }));
-                          }}
-                          className="px-1.5 py-1 rounded text-xs font-medium"
-                          style={{
-                            background: isSelected ? 'var(--color-accent)' : 'var(--color-bg)',
-                            color: isSelected ? 'var(--color-on-accent)' : 'var(--color-text-tertiary)',
-                            border: `1px solid ${isSelected ? 'var(--color-accent)' : 'var(--color-border)'}`,
-                          }}
-                        >
-                          {day}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <select
-                    value={(() => { const m = wizard.scheduleValue.match(/^0\s+(\d+)\s/); return m ? m[1] : '9'; })()}
-                    onChange={(e) => {
-                      const cronParts = wizard.scheduleValue.match(/\*\s+\*\s+(.+)$/);
-                      const days = cronParts ? cronParts[1] : '1';
-                      setWizard((w) => ({ ...w, scheduleValue: `0 ${e.target.value} * * ${days}` }));
-                    }}
-                    className="w-full px-3 py-1.5 rounded-lg text-xs"
-                    style={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-                  >
-                    {Array.from({ length: 24 }, (_, i) => {
-                      const label = i === 0 ? '12 AM' : i < 12 ? `${i} AM` : i === 12 ? '12 PM' : `${i - 12} PM`;
-                      return <option key={i} value={String(i)}>{label}</option>;
-                    })}
-                  </select>
-                </div>
-              )}
-              {wizard.scheduleType === 'hourly' && (
-                <div className="flex items-center gap-2 mt-1.5">
-                  <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>Every</span>
-                  <input
-                    type="number" min="1" max="24"
-                    value={(() => { const secs = parseInt(wizard.scheduleValue || '0', 10); return secs > 0 ? Math.round(secs / 3600) : 1; })()}
-                    onChange={(e) => {
-                      const hrs = Math.min(24, Math.max(1, parseInt(e.target.value, 10) || 1));
-                      setWizard((w) => ({ ...w, scheduleValue: String(hrs * 3600) }));
-                    }}
-                    className="w-14 px-2 py-1 rounded text-xs text-center"
-                    style={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-                  />
-                  <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>hours</span>
-                </div>
-              )}
-              {wizard.scheduleType === 'cron' && (
-                <input
-                  value={wizard.scheduleValue}
-                  onChange={(e) => setWizard((w) => ({ ...w, scheduleValue: e.target.value }))}
-                  placeholder="0 9 * * *"
-                  className="w-full px-3 py-1.5 rounded-lg text-xs bg-transparent mt-1.5"
-                  style={{ border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-                />
-              )}
-            </div>
+            <ScheduleFields
+              scheduleType={wizard.scheduleType}
+              scheduleValue={wizard.scheduleValue}
+              onChange={(next) => setWizard((w) => ({ ...w, ...next }))}
+            />
           </div>
 
           {/* Tools tags */}
@@ -1083,16 +1242,13 @@ function LaunchWizard({
                     placeholder="Unlimited"
                     className="w-full px-2 py-1 rounded text-xs" style={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }} />
                 </div>
-                <div>
-                  <label className="block text-xs mb-1" style={{ color: 'var(--color-text-tertiary)' }}>Schedule Type</label>
-                  <select value={wizard.scheduleType} onChange={(e) => setWizard((w) => ({ ...w, scheduleType: e.target.value, scheduleValue: e.target.value === 'manual' ? '' : w.scheduleValue }))}
-                    className="w-full px-2 py-1 rounded text-xs" style={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
-                    <option value="manual">Manual</option>
-                    <option value="daily">Daily</option>
-                    <option value="weekly">Weekly</option>
-                    <option value="hourly">Every N hours</option>
-                    <option value="cron">Custom (cron)</option>
-                  </select>
+                <div className="col-span-2">
+                  <ScheduleFields
+                    compact
+                    scheduleType={wizard.scheduleType}
+                    scheduleValue={wizard.scheduleValue}
+                    onChange={(next) => setWizard((w) => ({ ...w, ...next }))}
+                  />
                 </div>
               </div>
             </div>
@@ -1394,8 +1550,13 @@ function AgentInstructionSection({ agent, onAgentUpdated }: { agent: ManagedAgen
 function AgentConfigGrid({ agent, onAgentUpdated }: { agent: ManagedAgent; onAgentUpdated: () => void }) {
   const [editingModel, setEditingModel] = useState(false);
   const [changingModel, setChangingModel] = useState(false);
+  const [editingSchedule, setEditingSchedule] = useState(false);
+  const [changingSchedule, setChangingSchedule] = useState(false);
   const [models, setModels] = useState<string[]>([]);
   const currentModel = (agent.config?.model as string) || '(default)';
+  const initialSchedule = uiScheduleFromApi(agent.schedule_type, agent.schedule_value);
+  const [scheduleType, setScheduleType] = useState(initialSchedule.scheduleType);
+  const [scheduleValue, setScheduleValue] = useState(initialSchedule.scheduleValue);
 
   // Model availability status: 'available' | 'unavailable' | 'unknown'
   const [modelAvailable, setModelAvailable] = useState<'available' | 'unavailable' | 'unknown'>('unknown');
@@ -1428,6 +1589,13 @@ function AgentConfigGrid({ agent, onAgentUpdated }: { agent: ManagedAgent; onAge
     return () => { cancelled = true; };
   }, [currentModel]);
 
+  useEffect(() => {
+    const ui = uiScheduleFromApi(agent.schedule_type, agent.schedule_value);
+    setScheduleType(ui.scheduleType);
+    setScheduleValue(ui.scheduleValue);
+    setEditingSchedule(false);
+  }, [agent.id, agent.schedule_type, agent.schedule_value]);
+
   async function startEditingModel() {
     try {
       const fetched = (await fetchModels()).map((m) => m.id);
@@ -1454,6 +1622,26 @@ function AgentConfigGrid({ agent, onAgentUpdated }: { agent: ManagedAgent; onAge
     } catch { /* ignore */ }
     setEditingModel(false);
     setChangingModel(false);
+  }
+
+  async function saveSchedule() {
+    setChangingSchedule(true);
+    try {
+      const api = apiScheduleFromUi(scheduleType, scheduleValue);
+      const newConfig = {
+        ...(agent.config || {}),
+        schedule_type: api.schedule_type,
+        schedule_value: api.schedule_value,
+      };
+      await updateManagedAgent(agent.id, { config: newConfig });
+      onAgentUpdated();
+      toast.success('Schedule updated');
+      setEditingSchedule(false);
+    } catch {
+      toast.error('Failed to update schedule');
+    } finally {
+      setChangingSchedule(false);
+    }
   }
 
   const modelStatusDot = modelAvailable === 'available'
@@ -1520,7 +1708,52 @@ function AgentConfigGrid({ agent, onAgentUpdated }: { agent: ManagedAgent; onAge
       </span>
     )],
     ['Agent Type', <span key="at">{agent.agent_type}</span>],
-    ['Schedule', <span key="sc">{formatSchedule(agent.schedule_type, agent.schedule_value)}</span>],
+    ['Schedule', editingSchedule ? (
+      <div key="sc-edit" className="flex-1 min-w-0">
+        <ScheduleFields
+          compact
+          scheduleType={scheduleType}
+          scheduleValue={scheduleValue}
+          onChange={(next) => {
+            setScheduleType(next.scheduleType);
+            setScheduleValue(next.scheduleValue);
+          }}
+        />
+        <div className="flex gap-2 mt-1">
+          <button
+            onClick={saveSchedule}
+            disabled={changingSchedule}
+            className="text-xs px-2 py-0.5 rounded cursor-pointer"
+            style={{ background: 'var(--color-accent)', color: 'var(--color-on-accent)', opacity: changingSchedule ? 0.6 : 1 }}
+          >
+            {changingSchedule ? 'Saving...' : 'Save'}
+          </button>
+          <button
+            onClick={() => {
+              const ui = uiScheduleFromApi(agent.schedule_type, agent.schedule_value);
+              setScheduleType(ui.scheduleType);
+              setScheduleValue(ui.scheduleValue);
+              setEditingSchedule(false);
+            }}
+            className="text-xs px-2 py-0.5 rounded cursor-pointer"
+            style={{ color: 'var(--color-text-tertiary)', border: '1px solid var(--color-border)' }}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    ) : (
+      <span key="sc" className="flex items-center gap-2">
+        <span>{formatSchedule(agent.schedule_type, agent.schedule_value)}</span>
+        <button
+          onClick={() => setEditingSchedule(true)}
+          className="text-xs px-2 py-0.5 rounded cursor-pointer"
+          style={{ color: 'var(--color-accent)', border: '1px solid var(--color-accent)', opacity: 0.8 }}
+        >
+          Change
+        </button>
+      </span>
+    )],
     ['Last Run', <span key="lr">{formatRelativeTime(agent.last_run_at)}</span>],
     ['Budget', <span key="bg">{agent.budget ? formatCost(agent.budget) : 'Unlimited'}</span>],
     ['Learning', <span key="le">{agent.learning_enabled ? 'Enabled' : 'Disabled'}</span>],

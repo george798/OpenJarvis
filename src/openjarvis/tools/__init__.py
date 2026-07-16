@@ -145,6 +145,20 @@ try:
 except ImportError:
     pass
 
+# Slim project-context surface for external MCP clients (Cursor, OpenCode):
+# project_list + project_context with dual-layer (graph + code) routing.
+try:
+    import openjarvis.tools.project_context  # noqa: F401
+except ImportError:
+    pass
+
+# Deterministic memory routing: remember(content, kind) picks the right
+# store (memory.db / MEMORY.md / USER.md / Obsidian vault) server-side.
+try:
+    import openjarvis.tools.remember  # noqa: F401
+except ImportError:
+    pass
+
 try:
     import openjarvis.tools.text_to_speech  # noqa: F401
 except ImportError:

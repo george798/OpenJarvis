@@ -748,11 +748,17 @@ class AgentManager:
     @staticmethod
     def _row_to_agent(row: sqlite3.Row) -> Dict[str, Any]:
         config_raw = row["config_json"]
+        config = json.loads(config_raw) if config_raw else {}
+        schedule_value = config.get("schedule_value", "")
+        if schedule_value is not None and schedule_value != "":
+            schedule_value = str(schedule_value)
+        else:
+            schedule_value = ""
         return {
             "id": row["id"],
             "name": row["name"],
             "agent_type": row["agent_type"],
-            "config": json.loads(config_raw) if config_raw else {},
+            "config": config,
             "status": row["status"],
             "summary_memory": row["summary_memory"] or "",
             "created_at": row["created_at"],
@@ -766,6 +772,11 @@ class AgentManager:
             "current_activity": row["current_activity"] or "",
             "input_tokens": row["input_tokens"] or 0,
             "output_tokens": row["output_tokens"] or 0,
+            # Flattened from config for the web UI
+            "schedule_type": config.get("schedule_type", "manual"),
+            "schedule_value": schedule_value,
+            "budget": config.get("budget"),
+            "learning_enabled": bool(config.get("learning_enabled", False)),
         }
 
     @staticmethod

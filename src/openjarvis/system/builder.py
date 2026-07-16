@@ -381,7 +381,9 @@ class SystemBuilder:
 
         internal_server = MCPServer()
         for tool in internal_server.get_tools():
-            self._inject_tool_deps(tool, engine, model, memory_backend, channel_backend)
+            self._inject_tool_deps(
+                tool, engine, model, memory_backend, channel_backend, config
+            )
 
         tool_names = self._tool_names
         if tool_names is None:
@@ -429,7 +431,9 @@ class SystemBuilder:
         return tools
 
     @staticmethod
-    def _inject_tool_deps(tool, engine, model, memory_backend, channel_backend):
+    def _inject_tool_deps(
+        tool, engine, model, memory_backend, channel_backend, config=None
+    ):
         name = tool.spec.name
         if name == "llm":
             if hasattr(tool, "_engine"):
@@ -437,6 +441,31 @@ class SystemBuilder:
             if hasattr(tool, "_model"):
                 tool._model = model
         elif name == "retrieval":
+            if hasattr(tool, "_backend"):
+                tool._backend = memory_backend
+        elif name in ("memory_manage", "user_profile_manage"):
+            # These tools default to ~/.openjarvis/{MEMORY,USER}.md, but with
+            # persona_name set the system prompt reads
+            # ~/.openjarvis/personas/<name>/ — re-point them so their edits
+            # land in the files that actually get injected (see #persona bug).
+            if config is not None:
+                try:
+                    from pathlib import Path
+
+                    from openjarvis.prompt.builder import SystemPromptBuilder
+
+                    mf = SystemPromptBuilder._resolve_persona(
+                        config.memory_files
+                    )
+                    if name == "memory_manage" and mf.memory_path:
+                        tool._memory_path = Path(mf.memory_path).expanduser()
+                    elif name == "user_profile_manage" and mf.user_path:
+                        tool._user_path = Path(mf.user_path).expanduser()
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to wire persona paths for %s: %s", name, exc
+                    )
+        elif name == "remember":
             if hasattr(tool, "_backend"):
                 tool._backend = memory_backend
         elif name.startswith("memory_"):

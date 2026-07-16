@@ -18,6 +18,17 @@ except ImportError:
 logger = logging.getLogger("openjarvis.server.agent_manager")
 
 
+def _sync_agent_scheduler(request: Request, agent_id: str, agent: Dict[str, Any]) -> None:
+    """Register or deregister an agent with the background scheduler."""
+    scheduler = getattr(request.app.state, "agent_scheduler", None)
+    if scheduler is None:
+        return
+    scheduler.deregister_agent(agent_id)
+    sched_type = (agent.get("config") or {}).get("schedule_type", "manual")
+    if sched_type in ("cron", "interval"):
+        scheduler.register_agent(agent_id)
+
+
 class CreateAgentRequest(BaseModel):
     name: str
     agent_type: str = "monitor_operative"
@@ -1560,9 +1571,10 @@ def create_agent_manager_router(
                 name=req.name, agent_type=req.agent_type, config=req.config
             )
 
-        # Register with scheduler if cron/interval
+        # Register with scheduler if cron/interval (read from created agent config
+        # so template-based creates pick up schedule_type from the template).
         scheduler = getattr(request.app.state, "agent_scheduler", None)
-        sched_type = (req.config or {}).get("schedule_type", "manual")
+        sched_type = (agent.get("config") or {}).get("schedule_type", "manual")
         if scheduler and sched_type in ("cron", "interval"):
             scheduler.register_agent(agent["id"])
 
@@ -1576,8 +1588,9 @@ def create_agent_manager_router(
         return agent
 
     @agents_router.patch("/{agent_id}")
-    async def update_agent(agent_id: str, req: UpdateAgentRequest):
-        if not manager.get_agent(agent_id):
+    async def update_agent(agent_id: str, req: UpdateAgentRequest, request: Request):
+        existing = manager.get_agent(agent_id)
+        if not existing:
             raise HTTPException(status_code=404, detail="Agent not found")
         kwargs: Dict[str, Any] = {}
         if req.name is not None:
@@ -1585,8 +1598,12 @@ def create_agent_manager_router(
         if req.agent_type is not None:
             kwargs["agent_type"] = req.agent_type
         if req.config is not None:
-            kwargs["config"] = req.config
-        return manager.update_agent(agent_id, **kwargs)
+            # Merge partial config updates so callers can patch one field.
+            kwargs["config"] = {**(existing.get("config") or {}), **req.config}
+        agent = manager.update_agent(agent_id, **kwargs)
+        if req.config is not None:
+            _sync_agent_scheduler(request, agent_id, agent)
+        return agent
 
     @agents_router.delete("/{agent_id}")
     async def delete_agent(agent_id: str):
