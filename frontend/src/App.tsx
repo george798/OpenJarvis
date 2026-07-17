@@ -8,6 +8,7 @@ import { GetStartedPage } from './pages/GetStartedPage';
 import { AgentsPage } from './pages/AgentsPage';
 import { DataSourcesPage } from './pages/DataSourcesPage';
 import { LogsPage } from './pages/LogsPage';
+import { SystemMapPage } from './pages/SystemMapPage';
 import { CommandPalette } from './components/CommandPalette';
 import { SkillsPicker } from './components/Chat/SkillsPicker';
 import { SetupScreen } from './components/SetupScreen';
@@ -227,6 +228,7 @@ export default function App() {
         <Route element={<Layout />}>
           <Route index element={<ChatPage />} />
           <Route path="dashboard" element={<DashboardPage />} />
+          <Route path="system-map" element={<SystemMapPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="get-started" element={<GetStartedPage />} />
           <Route path="data-sources" element={<DataSourcesPage />} />

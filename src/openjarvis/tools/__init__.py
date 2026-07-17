@@ -187,6 +187,16 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.self_inspect  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.managed_agent_manage  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.digest_collect  # noqa: F401
 except ImportError:
     pass

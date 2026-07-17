@@ -56,7 +56,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         ``/api``. ``/health`` stays open for liveness probes. Speech health is
         open so the mic UI can detect STT availability before auth bootstrap.
         """
-        if path in ("/v1/speech/health", "/v1/speech/transcribe", "/v1/web/bootstrap"):
+        if path in (
+            "/v1/speech/health",
+            "/v1/speech/transcribe",
+            "/v1/web/bootstrap",
+            "/v1/analytics/identity",
+        ):
             return False
         # Google redirects here after consent — no Bearer token available.
         if "/oauth/callback" in path:

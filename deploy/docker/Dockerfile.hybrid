@@ -26,8 +26,9 @@ COPY deploy/windows deploy/windows
 COPY --from=frontend /src/openjarvis/server/static src/openjarvis/server/static/
 
 RUN pip install --no-cache-dir uv && \
-    uv pip install --system ".[server,inference-cloud,inference-litellm,memory-faiss,speech,speech-kokoro,browser,tools-search]" && \
+    uv pip install --system ".[server,inference-cloud,inference-litellm,memory-faiss,speech,speech-kokoro,browser,tools-search,scheduler]" && \
     uv pip install --system "mcp>=1.26" "maturin>=1.12" "markitdown[all]" "pdfplumber" && \
+    uv pip install --system "markitdown-mcp" --no-deps && \
     maturin build --release -m rust/crates/openjarvis-python/Cargo.toml -o /tmp/wheels && \
     uv pip install --system /tmp/wheels/*.whl
 

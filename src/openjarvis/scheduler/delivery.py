@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ def deliver_scheduled_result(
 ) -> bool:
     """Send a scheduler run result to a configured channel.
 
-    Task metadata keys (Hermes-style):
+    Task metadata keys:
         deliver_to: channel adapter id (e.g. ``telegram``, ``discord``)
         deliver_recipient: conversation / sender id on that channel
         no_agent: when true, deliver the prompt itself (reminder mode)
@@ -69,3 +69,6 @@ def deliver_scheduled_result(
             recipient,
         )
         return False
+
+
+__all__ = ["deliver_scheduled_result"]

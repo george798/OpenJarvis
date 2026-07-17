@@ -242,7 +242,7 @@ class TaskScheduler:
                     [t.strip() for t in raw_tools if t.strip()] if task.tools else []
                 )
                 if not tools_list and self._config is not None:
-                    from openjarvis.hermes.toolsets import resolve_tool_names
+                    from openjarvis.core.toolsets import resolve_tool_names
 
                     resolved = resolve_tool_names("cron", self._config)
                     if resolved is not None:
@@ -310,7 +310,7 @@ class TaskScheduler:
             and self._config is not None
             and getattr(self._config.scheduler, "delivery_enabled", True)
         ):
-            from openjarvis.hermes.delivery import deliver_scheduled_result
+            from openjarvis.scheduler.delivery import deliver_scheduled_result
 
             deliver_scheduled_result(
                 task_id=task.id,

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -106,17 +107,23 @@ class AgentManager:
 
     def __init__(self, db_path: str, *, clear_stale_running: bool = False) -> None:
         self._db_path = str(db_path)
+        # Tool ticks publish events from ThreadPool workers that call
+        # update_agent while the tick thread also uses this connection.
+        # check_same_thread=False alone is not enough — SQLite still requires
+        # serialized access on a shared connection.
+        self._lock = threading.RLock()
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute(_CREATE_AGENTS)
-        self._conn.execute(_CREATE_TASKS)
-        self._conn.execute(_CREATE_BINDINGS)
-        self._conn.executescript(_CREATE_CHECKPOINTS)
-        self._conn.executescript(_CREATE_MESSAGES)
-        self._conn.executescript(_CREATE_LEARNING_LOG)
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.execute(_CREATE_AGENTS)
+            self._conn.execute(_CREATE_TASKS)
+            self._conn.execute(_CREATE_BINDINGS)
+            self._conn.executescript(_CREATE_CHECKPOINTS)
+            self._conn.executescript(_CREATE_MESSAGES)
+            self._conn.executescript(_CREATE_LEARNING_LOG)
+            self._conn.commit()
         # Schema migrations for runtime columns
         _MIGRATIONS = [
             "ALTER TABLE managed_agents ADD COLUMN total_tokens INTEGER DEFAULT 0",
@@ -213,14 +220,16 @@ class AgentManager:
         if not include_archived:
             query += " WHERE status != 'archived'"
         query += " ORDER BY updated_at DESC"
-        rows = self._conn.execute(query).fetchall()
-        return [self._row_to_agent(r) for r in rows]
+        with self._lock:
+            rows = self._conn.execute(query).fetchall()
+            return [self._row_to_agent(r) for r in rows]
 
     def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        row = self._conn.execute(
-            "SELECT * FROM managed_agents WHERE id = ?", (agent_id,)
-        ).fetchone()
-        return self._row_to_agent(row) if row else None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM managed_agents WHERE id = ?", (agent_id,)
+            ).fetchone()
+            return self._row_to_agent(row) if row else None
 
     def update_agent(self, agent_id: str, **kwargs: Any) -> Dict[str, Any]:
         sets: List[str] = []
@@ -263,11 +272,12 @@ class AgentManager:
         sets.append("updated_at = ?")
         vals.append(time.time())
         vals.append(agent_id)
-        self._conn.execute(
-            f"UPDATE managed_agents SET {', '.join(sets)} WHERE id = ?", vals
-        )
-        self._conn.commit()
-        return self.get_agent(agent_id)  # type: ignore[return-value]
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE managed_agents SET {', '.join(sets)} WHERE id = ?", vals
+            )
+            self._conn.commit()
+            return self.get_agent(agent_id)  # type: ignore[return-value]
 
     def delete_agent(self, agent_id: str) -> None:
         self._set_status(agent_id, "archived")
@@ -279,11 +289,12 @@ class AgentManager:
         self._set_status(agent_id, "idle")
 
     def _set_status(self, agent_id: str, status: str) -> None:
-        self._conn.execute(
-            "UPDATE managed_agents SET status = ?, updated_at = ? WHERE id = ?",
-            (status, time.time(), agent_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE managed_agents SET status = ?, updated_at = ? WHERE id = ?",
+                (status, time.time(), agent_id),
+            )
+            self._conn.commit()
 
     # ── Tick concurrency guard ────────────────────────────────────
 
@@ -308,12 +319,13 @@ class AgentManager:
         self._set_status(agent_id, "running")
 
     def end_tick(self, agent_id: str) -> None:
-        self._conn.execute(
-            "UPDATE managed_agents SET status = 'idle', "
-            "current_activity = '', updated_at = ? WHERE id = ?",
-            (time.time(), agent_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE managed_agents SET status = 'idle', "
+                "current_activity = '', updated_at = ? WHERE id = ?",
+                (time.time(), agent_id),
+            )
+            self._conn.commit()
 
     # ── Checkpoints ───────────────────────────────────────────────
 

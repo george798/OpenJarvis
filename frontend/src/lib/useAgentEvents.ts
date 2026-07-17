@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { getBase } from './api';
+import { getApiKey, getBase } from './api';
 
 export interface AgentEvent {
   type: string;
@@ -17,9 +17,15 @@ function buildWsUrl(agentId?: string): string {
     origin = `${loc.protocol === 'https:' ? 'wss:' : 'ws:'}//${loc.host}`;
   }
   const path = '/v1/agents/events';
-  return agentId
-    ? `${origin}${path}?agent_id=${encodeURIComponent(agentId)}`
-    : `${origin}${path}`;
+  // WebSocket handshakes can't carry an Authorization header from the
+  // browser, so the server accepts ?token= (see websocket_authorized).
+  // Without it, every connection is rejected (403) when an API key is set.
+  const params = new URLSearchParams();
+  if (agentId) params.set('agent_id', agentId);
+  const apiKey = getApiKey();
+  if (apiKey) params.set('token', apiKey);
+  const qs = params.toString();
+  return qs ? `${origin}${path}?${qs}` : `${origin}${path}`;
 }
 
 /**

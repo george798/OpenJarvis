@@ -1137,6 +1137,78 @@ async def start_optimize_run(req: OptimizeRunRequest, request: Request):
     return {"status": "started", "run_id": "placeholder"}
 
 
+# ---- Capabilities + config (self-awareness / System Map) ----
+
+capabilities_router = APIRouter(prefix="/v1/capabilities", tags=["capabilities"])
+config_router = APIRouter(prefix="/v1/config", tags=["config"])
+
+
+@capabilities_router.get("")
+async def get_capabilities(request: Request):
+    """Live capability map: tools, MCP, connectors, knowledge, agents, vault."""
+    from openjarvis.core.capabilities import build_capability_index
+
+    return build_capability_index(request.app.state)
+
+
+class ConfigSetRequest(BaseModel):
+    key: str
+    value: Any
+
+
+@config_router.get("")
+async def get_config(request: Request):
+    """Return config.toml as JSON plus settable section schema."""
+    import os
+    from pathlib import Path
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    from openjarvis.core.config import DEFAULT_CONFIG_PATH, _SETTABLE_SECTIONS
+
+    path = Path(os.environ.get("OPENJARVIS_CONFIG", DEFAULT_CONFIG_PATH)).expanduser()
+    data: Dict[str, Any] = {}
+    if path.exists():
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+
+    # Redact obvious secrets
+    def _redact(obj: Any, key_hint: str = "") -> Any:
+        if isinstance(obj, dict):
+            return {k: _redact(v, k) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_redact(v, key_hint) for v in obj]
+        low = key_hint.lower()
+        if isinstance(obj, str) and any(
+            s in low for s in ("secret", "password", "token", "api_key", "apikey")
+        ):
+            if len(obj) > 8:
+                return obj[:3] + "…" + obj[-2:]
+            return "****"
+        return obj
+
+    return {
+        "path": str(path),
+        "sections": sorted(_SETTABLE_SECTIONS),
+        "config": _redact(data),
+    }
+
+
+@config_router.put("")
+async def put_config(request: Request, body: ConfigSetRequest):
+    """Set one dotted config key (same semantics as config_manage set)."""
+    from openjarvis.tools.config_manage import ConfigManageTool
+
+    tool = ConfigManageTool()
+    result = tool.execute(action="set", key=body.key, value=body.value)
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.content)
+    return {"status": "ok", "message": result.content}
+
+
 def include_all_routes(app) -> None:
     """Include all extended API routers in a FastAPI app."""
     from openjarvis.server.approval_routes import (
@@ -1158,6 +1230,8 @@ def include_all_routes(app) -> None:
     app.include_router(web_router)
     app.include_router(feedback_router)
     app.include_router(optimize_router)
+    app.include_router(capabilities_router)
+    app.include_router(config_router)
 
     # Agent Manager routes (if available)
     try:

@@ -122,7 +122,7 @@ class OrchestratorAgent(ToolUsingAgent):
         # Hermes-style learning loop: distill successful multi-step tasks
         # into reusable skills (fire-and-forget background reflection).
         try:
-            from openjarvis.hermes.skill_loop import maybe_learn_skill
+            from openjarvis.skills.loop import maybe_learn_skill
 
             maybe_learn_skill(self, input, result)
         except Exception:

@@ -70,9 +70,13 @@ def _summarize(text: str, limit: int = 400) -> str:
     return text
 
 
-def _append_journal(vault: Path, traces: list[dict], new_skills: list[str]) -> None:
+def _append_journal(
+    vault: Path, traces: list[dict], new_skills: list[str]
+) -> list[Path]:
+    """Append entries to daily journal notes; return the touched note paths."""
     journal_dir = vault / "Journal"
     journal_dir.mkdir(parents=True, exist_ok=True)
+    touched: list[Path] = []
 
     by_day: dict[str, list[dict]] = {}
     for tr in traces:
@@ -102,6 +106,7 @@ def _append_journal(vault: Path, traces: list[dict], new_skills: list[str]) -> N
         if lines:
             with note.open("a", encoding="utf-8") as fh:
                 fh.write("\n".join(lines) + "\n")
+            touched.append(note)
 
     if new_skills:
         today = datetime.now().strftime("%Y-%m-%d")
@@ -111,6 +116,53 @@ def _append_journal(vault: Path, traces: list[dict], new_skills: list[str]) -> N
             for name in new_skills:
                 fh.write(f"- `{name}`\n")
             fh.write("\n")
+        if note not in touched:
+            touched.append(note)
+
+    return touched
+
+
+def _reindex_notes(vault: Path, notes: list[Path]) -> None:
+    """Re-ingest freshly written journal notes into knowledge.db.
+
+    Without this, journal entries only become searchable after the next
+    full vault sync — historically the next server restart — leaving the
+    "compounding memory" loop half-open for the rest of the day.
+    """
+    if not notes:
+        return
+    try:
+        from openjarvis.connectors._stubs import Document
+        from openjarvis.connectors.pipeline import IngestionPipeline
+        from openjarvis.connectors.store import KnowledgeStore
+
+        docs = []
+        for note in notes:
+            try:
+                text = note.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            rel = note.relative_to(vault)
+            docs.append(
+                Document(
+                    doc_id=f"obsidian:{rel.as_posix()}",
+                    source="obsidian",
+                    doc_type="note",
+                    content=text,
+                    title=note.stem,
+                    timestamp=datetime.now(),
+                )
+            )
+        if docs:
+            pipeline = IngestionPipeline(store=KnowledgeStore())
+            count = pipeline.ingest(docs, replace=True)
+            logger.debug(
+                "Vault writeback: re-indexed %d journal notes (%d chunks)",
+                len(docs),
+                count,
+            )
+    except Exception:
+        logger.exception("Vault writeback: journal re-index failed")
 
 
 def _current_skills(skills_dir: str) -> list[str]:
@@ -139,7 +191,8 @@ def _writeback_once(config: Any, vault: Path) -> None:
     if not traces and not new_skills:
         return
 
-    _append_journal(vault, traces, new_skills)
+    touched = _append_journal(vault, traces, new_skills)
+    _reindex_notes(vault, touched)
 
     if traces:
         cp["last_trace_rowid"] = max(int(t["rid"]) for t in traces)

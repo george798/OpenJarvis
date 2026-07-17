@@ -14,6 +14,7 @@ Typical usage::
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from typing import TYPE_CHECKING, Iterable, Optional
 
@@ -21,6 +22,8 @@ from openjarvis.connectors._stubs import Attachment, Document
 from openjarvis.connectors.chunker import SemanticChunker
 from openjarvis.connectors.embeddings import OllamaEmbedder
 from openjarvis.connectors.store import KnowledgeStore
+
+logger = logging.getLogger(__name__)
 
 
 def _namespace_thread_id(source: str, thread_id: Optional[str]) -> Optional[str]:
@@ -145,7 +148,7 @@ class IngestionPipeline:
     # Public API
     # ------------------------------------------------------------------
 
-    def ingest(self, documents: Iterable[Document]) -> int:
+    def ingest(self, documents: Iterable[Document], *, replace: bool = False) -> int:
         """Ingest an iterable of documents into the knowledge store.
 
         Duplicate ``doc_id`` values are silently skipped (both across
@@ -156,6 +159,11 @@ class IngestionPipeline:
         documents:
             An iterable of ``Document`` objects (e.g. from a connector's
             ``sync()`` method).
+        replace:
+            When True, previously seen ``doc_id`` values are deleted and
+            re-ingested instead of skipped. Required for mutable sources
+            (e.g. Obsidian vault files) whose content changes in place —
+            plain dedupe would pin the first-indexed version forever.
 
         Returns
         -------
@@ -166,7 +174,15 @@ class IngestionPipeline:
 
         for doc in documents:
             if doc.doc_id in self._seen_doc_ids:
-                continue
+                if not replace:
+                    continue
+                try:
+                    self._store.delete(doc.doc_id)
+                except Exception:
+                    logger.debug(
+                        "Replace-ingest: delete failed for %s", doc.doc_id
+                    )
+                self._seen_doc_ids.discard(doc.doc_id)
 
             # Compute v1 provenance fields once per document.
             namespaced_thread = _namespace_thread_id(doc.source, doc.thread_id)

@@ -40,7 +40,15 @@ class QueryOrchestrator:
 
         messages = [Message(role=Role.USER, content=query)]
 
-        if context and s.memory_backend and s.config.agent.context_from_memory:
+        want_mem = (
+            context
+            and s.memory_backend
+            and s.config.agent.context_from_memory
+        )
+        want_kn = context and getattr(
+            s.config.agent, "context_from_knowledge", False
+        )
+        if want_mem or want_kn:
             try:
                 from openjarvis.tools.storage.context import (
                     ContextConfig,
@@ -48,6 +56,7 @@ class QueryOrchestrator:
                 )
 
                 ctx_cfg = ContextConfig(
+                    enabled=bool(want_mem),
                     top_k=s.config.memory.context_top_k,
                     min_score=s.config.memory.context_min_score,
                     max_context_tokens=s.config.memory.context_max_tokens,
@@ -57,6 +66,7 @@ class QueryOrchestrator:
                     messages,
                     s.memory_backend,
                     config=ctx_cfg,
+                    jarvis_config=s.config,
                 )
             except Exception as exc:
                 logger.warning("Failed to inject memory context: %s", exc)

@@ -1,4 +1,4 @@
-"""Natural-language schedule parsing (Hermes cron parity, subset)."""
+"""Natural-language schedule parsing (English -> cron/interval expressions)."""
 
 from __future__ import annotations
 
@@ -115,3 +115,6 @@ def parse_natural_schedule(text: str) -> Optional[ParsedSchedule]:
         return ParsedSchedule("cron", cron, raw)
 
     return None
+
+
+__all__ = ["ParsedSchedule", "parse_natural_schedule"]

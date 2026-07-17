@@ -1,8 +1,9 @@
-"""Outbound self-improving skill loop (Hermes parity).
+"""Outbound self-improving skill loop.
 
-Hermes's signature behaviour: when the agent solves a complex task, it writes
-a reusable skill document so it never has to figure that out again. This
-module implements that reflection step for OpenJarvis agents.
+When the agent solves a complex task, it writes a reusable skill document so
+it never has to figure that out again (behaviour inspired by
+NousResearch/hermes-agent). This module implements that reflection step for
+OpenJarvis agents.
 
 After a tool-using agent finishes a task with enough successful tool calls,
 ``maybe_learn_skill`` asks the same engine to decide — in one cheap extra

@@ -76,17 +76,23 @@ class SyncEngine:
     # Public API
     # ------------------------------------------------------------------
 
-    def sync(self, connector: BaseConnector) -> int:
+    def sync(self, connector: BaseConnector, *, replace: bool | None = None) -> int:
         """Run a full sync for *connector* and return the number of items ingested.
 
         Resumes from the last saved cursor if one exists.  Documents are
         batched in groups of 100 before being handed to the pipeline; a
         checkpoint is saved after every batch and once more at the end.
 
+        ``replace`` re-ingests documents whose ``doc_id`` was seen before
+        (needed for mutable sources like markdown vaults). When ``None``,
+        the connector's ``mutable_documents`` attribute decides.
+
         On error the checkpoint is updated with the error message and the
         exception is re-raised so callers can handle it.
         """
         connector_id: str = connector.connector_id
+        if replace is None:
+            replace = bool(getattr(connector, "mutable_documents", False))
 
         # Load any previous checkpoint so we can resume.
         checkpoint = self.get_checkpoint(connector_id)
@@ -111,7 +117,7 @@ class SyncEngine:
                 batch.append(doc)
 
                 if len(batch) >= _BATCH_SIZE:
-                    items_ingested += self._pipeline.ingest(batch)
+                    items_ingested += self._pipeline.ingest(batch, replace=replace)
                     batch = []
                     self._save_checkpoint(
                         connector_id,
@@ -121,7 +127,7 @@ class SyncEngine:
 
             # Ingest any remaining documents.
             if batch:
-                items_ingested += self._pipeline.ingest(batch)
+                items_ingested += self._pipeline.ingest(batch, replace=replace)
 
         except Exception as exc:
             self._save_checkpoint(

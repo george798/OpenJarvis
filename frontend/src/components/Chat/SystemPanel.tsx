@@ -13,7 +13,7 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import { useAppStore } from '../../lib/store';
-import { getBase } from '../../lib/api';
+import { fetchEnergy, fetchTelemetry } from '../../lib/api';
 
 interface EnergyData {
   total_energy_j?: number;
@@ -45,10 +45,9 @@ export function SystemPanel() {
 
   const fetchData = useCallback(async () => {
     try {
-      const base = getBase();
       const [energyRes, telRes] = await Promise.allSettled([
-        fetch(`${base}/v1/telemetry/energy`).then((r) => (r.ok ? r.json() : null)),
-        fetch(`${base}/v1/telemetry/stats`).then((r) => (r.ok ? r.json() : null)),
+        fetchEnergy().catch(() => null),
+        fetchTelemetry().catch(() => null),
       ]);
       if (energyRes.status === 'fulfilled' && energyRes.value) {
         setEnergy(energyRes.value as EnergyData);

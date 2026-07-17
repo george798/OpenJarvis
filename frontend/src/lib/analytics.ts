@@ -18,7 +18,7 @@
  */
 
 import posthog from 'posthog-js';
-import { getBase } from './api';
+import { authHeaders, getBase } from './api';
 
 /**
  * Mirror of the Python event catalog (src/openjarvis/analytics/events.py
@@ -74,7 +74,9 @@ export async function initAnalytics(): Promise<void> {
     const base = getBase();
     if (!base) return;
 
-    const resp = await fetch(`${base}/v1/analytics/identity`);
+    const resp = await fetch(`${base}/v1/analytics/identity`, {
+      headers: authHeaders(),
+    });
     if (!resp.ok) return;
 
     const identity: AnalyticsIdentity = await resp.json();

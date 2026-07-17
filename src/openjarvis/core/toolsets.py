@@ -1,4 +1,8 @@
-"""Per-platform tool restrictions (Hermes ``hermes tools`` parity)."""
+"""Per-platform tool restrictions.
+
+Full tools on CLI/web, restricted sets on messaging channels and cron —
+overridable via the ``[toolsets]`` config section.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,6 @@ from typing import TYPE_CHECKING, List, Optional
 if TYPE_CHECKING:
     from openjarvis.core.config import JarvisConfig
 
-# Hermes-style defaults: full tools on CLI/web, restricted on messaging/cron.
 _DEFAULT_RESTRICTED = (
     "retrieval,calculator,think,knowledge_search,knowledge_sql,"
     "memory_search,memory_retrieve,file_read,web_search,skill_manage"
@@ -99,3 +102,6 @@ def resolve_tool_names(
     base_set = set(base)
     filtered = [t for t in allowed if t in base_set]
     return filtered or allowed
+
+
+__all__ = ["normalize_platform", "resolve_tool_names"]

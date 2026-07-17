@@ -309,7 +309,7 @@ class ChannelBridge:
                 tools = None
                 config = getattr(self._system, "config", None)
                 if config is not None:
-                    from openjarvis.hermes.toolsets import resolve_tool_names
+                    from openjarvis.core.toolsets import resolve_tool_names
 
                     tools = resolve_tool_names(channel_type, config)
                 ask_kwargs: dict = {}

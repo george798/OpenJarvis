@@ -93,6 +93,15 @@ def _platform_status_prompt() -> str:
         "Before asking the user for any API key, call credential_manage action=list. "
         "If the key is already stored, use the $ENV_VAR reference instead."
     )
+
+    try:
+        from openjarvis.core.capabilities import capability_prompt_block
+
+        lines.append("")
+        lines.append(capability_prompt_block())
+    except Exception:
+        pass
+
     return "\n".join(lines)
 
 
@@ -886,17 +895,17 @@ def serve(
     # attached to app.state here.
     app.state.scheduler = task_scheduler
 
-    # Hermes-parity bootstrap: skill sync, memory files
+    # Startup bootstrap: persona files, skill sync, vault memory loop
     try:
-        from openjarvis.hermes.startup import run_hermes_startup
+        from openjarvis.system.bootstrap import run_startup_bootstrap
 
-        _boot = run_hermes_startup(config)
+        _boot = run_startup_bootstrap(config)
         if _boot.get("skills"):
             console.print(
-                f"  Hermes skills: [cyan]{_boot['skills']}[/cyan]"
+                f"  Skills synced: [cyan]{_boot['skills']}[/cyan]"
             )
     except Exception as exc:
-        logger.debug("Hermes startup skipped: %s", exc)
+        logger.debug("Startup bootstrap skipped: %s", exc)
 
     # Wire scheduler delivery to channel bridge when both exist
     try:

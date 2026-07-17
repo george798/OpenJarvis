@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Dict, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from openjarvis.connectors._stubs import BaseConnector
 from openjarvis.connectors.sync_engine import SyncEngine
@@ -42,14 +42,39 @@ class SyncScheduler:
     interval_seconds:
         How often (in seconds) to sync all connected connectors.
         Defaults to ``3600`` (one hour).
+    connector_provider:
+        Optional callable returning the current set of connectors on every
+        cycle. Lets the scheduler pick up connectors that are connected at
+        runtime (e.g. via the web app's OAuth flow) without re-registration.
     """
 
-    def __init__(self, sync_engine: SyncEngine, interval_seconds: int = 3600) -> None:
+    def __init__(
+        self,
+        sync_engine: SyncEngine,
+        interval_seconds: int = 3600,
+        connector_provider: Optional[
+            Callable[[], Iterable[BaseConnector]]
+        ] = None,
+    ) -> None:
         self._engine = sync_engine
         self._interval = interval_seconds
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._connectors: List[BaseConnector] = []
+        self._provider = connector_provider
+
+    def _current_connectors(self) -> List[BaseConnector]:
+        """Statically added connectors plus provider results, deduped by id."""
+        seen: dict[str, BaseConnector] = {
+            c.connector_id: c for c in self._connectors
+        }
+        if self._provider is not None:
+            try:
+                for conn in self._provider():
+                    seen.setdefault(conn.connector_id, conn)
+            except Exception:
+                logger.debug("Connector provider failed", exc_info=True)
+        return list(seen.values())
 
     # ------------------------------------------------------------------
     # Public API
@@ -111,7 +136,7 @@ class SyncScheduler:
             Only connectors that are currently connected are included.
         """
         results: Dict[str, int] = {}
-        for conn in self._connectors:
+        for conn in self._current_connectors():
             if conn.is_connected():
                 try:
                     count = self._engine.sync(conn)
@@ -129,7 +154,7 @@ class SyncScheduler:
     def _loop(self) -> None:
         """Background thread body: wait *interval* seconds then sync."""
         while not self._stop.wait(timeout=self._interval):
-            for conn in self._connectors:
+            for conn in self._current_connectors():
                 if conn.is_connected():
                     try:
                         count = self._engine.sync(conn)

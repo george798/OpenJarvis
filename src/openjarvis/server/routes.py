@@ -113,14 +113,16 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     # metadata (see stream_bridge / _handle_agent). request_body.skill is
     # passed through on every chat completion from the web UI skills picker.
 
-    # Inject memory context into messages before dispatching
+    # Inject memory (+ optional knowledge.db) context before dispatching
     config = getattr(request.app.state, "config", None)
     memory_backend = getattr(request.app.state, "memory_backend", None)
     if (
         config is not None
-        and memory_backend is not None
-        and config.agent.context_from_memory
         and request_body.messages
+        and (
+            (memory_backend is not None and config.agent.context_from_memory)
+            or getattr(config.agent, "context_from_knowledge", False)
+        )
     ):
         try:
             from openjarvis.tools.storage.context import ContextConfig, inject_context
@@ -135,6 +137,10 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
             if query_text:
                 messages = _to_messages(request_body.messages)
                 ctx_cfg = ContextConfig(
+                    enabled=bool(
+                        memory_backend is not None
+                        and config.agent.context_from_memory
+                    ),
                     top_k=config.memory.context_top_k,
                     min_score=config.memory.context_min_score,
                     max_context_tokens=config.memory.context_max_tokens,
@@ -144,6 +150,7 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                     messages,
                     memory_backend,
                     config=ctx_cfg,
+                    jarvis_config=config,
                 )
                 # Rebuild request messages from enriched Message objects
                 if len(enriched) > len(messages):

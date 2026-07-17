@@ -1219,6 +1219,80 @@ export async function fetchSkills(): Promise<import('../types').SkillInfo[]> {
   return data.skills || [];
 }
 
+export interface CapabilitiesIndex {
+  summary?: {
+    tools_enabled?: number;
+    tools_registry?: number;
+    mcp_servers?: number;
+    connectors_connected?: number;
+    connectors_total?: number;
+    knowledge_chunks?: number;
+    knowledge_sources?: number;
+    managed_agents?: number;
+    vault_configured?: boolean;
+    model?: string;
+  };
+  tools?: {
+    enabled?: string[];
+    enabled_count?: number;
+    registry_count?: number;
+    mcp_wildcard?: boolean;
+  };
+  mcp_servers?: Array<{ name: string; kind: string; url?: string; command?: string }>;
+  connectors?: Array<{ id: string; connected: boolean }>;
+  knowledge?: { chunk_count?: number; sources?: Record<string, number>; source_count?: number };
+  memory?: {
+    context_from_memory?: boolean;
+    context_from_knowledge?: boolean;
+  };
+  vault?: {
+    configured?: boolean;
+    path?: string;
+    note_count?: number;
+    journal_count?: number;
+    writeback?: boolean;
+    writeback_interval?: number;
+  };
+  managed_agents?: Array<{
+    id: string;
+    name: string;
+    status: string;
+    schedule_type?: string;
+    schedule_value?: string;
+    agent_type?: string;
+  }>;
+}
+
+export async function fetchCapabilities(): Promise<CapabilitiesIndex> {
+  const res = await apiFetch('/v1/capabilities');
+  if (!res.ok) throw new Error(`Failed to fetch capabilities: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchConfig(): Promise<{
+  path: string;
+  sections: string[];
+  config: Record<string, unknown>;
+}> {
+  const res = await apiFetch('/v1/config');
+  if (!res.ok) throw new Error(`Failed to fetch config: ${res.status}`);
+  return res.json();
+}
+
+export async function setConfigKey(key: string, value: string | number | boolean): Promise<string> {
+  const res = await apiFetch('/v1/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, value }),
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Config update failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.message || 'ok';
+}
+
 export async function fetchSkillDetail(name: string): Promise<import('../types').SkillDetail> {
   const res = await apiFetch(`/v1/skills/${encodeURIComponent(name)}`);
   if (!res.ok) throw new Error(`Failed to load skill ${name}: ${res.status}`);

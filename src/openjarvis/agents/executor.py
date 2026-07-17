@@ -23,13 +23,12 @@ logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
 
-# Default model for monitor_operative / long-horizon agent ticks. qwen3:8b
-# emits tool_calls but, when given the full MonitorOperative system prompt
-# alongside a `think` no-op tool, reliably picks `think` instead of the real
-# action tools — producing tickless prose from training-data memory.
-# gemma4:31b follows the function-calling protocol with the same prompt and
-# actually invokes web_search / memory_retrieve. Explicit ``config["model"]``
-# on an agent still wins.
+# Last-resort model for agent ticks when neither the agent config nor the
+# running system supplies one. Historically this was preferred over the
+# system model (qwen3:8b-era models ignored tool_calls), but hardcoding it
+# ahead of the system model made every tick 404 on installs without
+# gemma4:31b. The server's active model now wins; explicit ``config["model"]``
+# on an agent always wins.
 _AGENT_TICK_DEFAULT_MODEL = "gemma4:31b"
 
 
@@ -66,23 +65,30 @@ class AgentExecutor:
     def _inject_tool_deps(self, tool: Any) -> None:
         """Inject runtime dependencies into a tool instance.
 
-        Mirrors SystemBuilder._inject_tool_deps (system.py:920-945)
-        but uses the lightweight system's references.
+        Delegates to SystemBuilder._inject_tool_deps so tick paths get the
+        exact same wiring as the chat brain (persona-resolved memory files,
+        remember backend, knowledge store, channels, llm engine) instead of
+        a partial copy that silently skipped several tools.
         """
         if self._system is None:
             return
-        name = getattr(getattr(tool, "spec", None), "name", "")
-        if name == "llm":
-            if hasattr(tool, "_engine"):
-                tool._engine = self._system.engine
-            if hasattr(tool, "_model"):
-                tool._model = self._system.model
-        elif name == "retrieval" or name.startswith("memory_"):
-            if hasattr(tool, "_backend"):
-                tool._backend = getattr(self._system, "memory_backend", None)
-        elif name.startswith("channel_"):
-            if hasattr(tool, "_channel"):
-                tool._channel = getattr(self._system, "channel_backend", None)
+        try:
+            from openjarvis.system.builder import SystemBuilder
+
+            SystemBuilder._inject_tool_deps(
+                tool,
+                getattr(self._system, "engine", None),
+                getattr(self._system, "model", ""),
+                getattr(self._system, "memory_backend", None),
+                getattr(self._system, "channel_backend", None),
+                config=getattr(self._system, "config", None),
+            )
+        except Exception:
+            logger.debug(
+                "Tool dependency injection failed for %s",
+                getattr(getattr(tool, "spec", None), "name", "?"),
+                exc_info=True,
+            )
 
     def run_ephemeral(
         self,
@@ -268,8 +274,8 @@ class AgentExecutor:
             raise FatalError("No engine available in JarvisSystem")
         model = (
             config.get("model")
-            or _AGENT_TICK_DEFAULT_MODEL
             or (self._system.model if self._system else "")
+            or _AGENT_TICK_DEFAULT_MODEL
         )
         if not model:
             raise FatalError("No model configured for agent")
@@ -335,18 +341,82 @@ class AgentExecutor:
             # adapters) that aren't in the static ToolRegistry. Without this,
             # agents declaring MCP-discovered tools in their template would
             # silently fall back to natives only.
+            want_all_mcp = any(t in ("mcp:*", "*") for t in tool_names)
             if (
                 self._system is not None
                 and getattr(self._system, "tool_executor", None) is not None
             ):
                 mcp_pool = getattr(self._system.tool_executor, "_tools", {}) or {}
                 existing = {t.spec.name for t in tool_instances}
+                if want_all_mcp:
+                    for pname, pooled in mcp_pool.items():
+                        if pname not in existing:
+                            tool_instances.append(pooled)
+                            existing.add(pname)
                 for tname in tool_names:
                     if tname in existing:
                         continue
                     pooled = mcp_pool.get(tname)
                     if pooled is not None:
                         tool_instances.append(pooled)
+
+            # Last resort: names still unresolved (no serve-time pool, e.g.
+            # CLI `jarvis agents run` in a fresh process) — discover them
+            # directly from the MCP server config. Clients are pinned on the
+            # system so their transports outlive this call.
+            resolved_names = {ti.spec.name for ti in tool_instances}
+            missing = [
+                t
+                for t in tool_names
+                if t not in resolved_names and t not in ("mcp:*", "*")
+            ]
+            had_pool = (
+                self._system is not None
+                and getattr(self._system, "tool_executor", None) is not None
+            )
+            if missing or (want_all_mcp and not had_pool):
+                mcp_cfg = getattr(
+                    getattr(self._system, "config", None), "tools", None
+                )
+                mcp_cfg = getattr(mcp_cfg, "mcp", None)
+                if mcp_cfg is not None:
+                    try:
+                        from openjarvis.mcp.loader import (
+                            load_mcp_tools_from_config,
+                        )
+
+                        mcp_tools, mcp_clients = load_mcp_tools_from_config(
+                            mcp_cfg,
+                            allowed_names=None if want_all_mcp else set(missing),
+                        )
+                        mcp_tools = [
+                            t
+                            for t in mcp_tools
+                            if t.spec.name not in resolved_names
+                        ]
+                        if mcp_clients:
+                            held = getattr(self._system, "_mcp_clients", None)
+                            if isinstance(held, list):
+                                held.extend(mcp_clients)
+                            else:
+                                try:
+                                    self._system._mcp_clients = mcp_clients
+                                except Exception:
+                                    self._mcp_clients = mcp_clients
+                        tool_instances.extend(mcp_tools)
+                        if mcp_tools:
+                            logger.info(
+                                "Agent %s: loaded %d MCP tools on demand (%s)",
+                                agent["name"],
+                                len(mcp_tools),
+                                ", ".join(t.spec.name for t in mcp_tools),
+                            )
+                    except Exception:
+                        logger.warning(
+                            "On-demand MCP discovery failed for %s",
+                            ", ".join(missing),
+                            exc_info=True,
+                        )
 
             if tool_instances:
                 logger.info(

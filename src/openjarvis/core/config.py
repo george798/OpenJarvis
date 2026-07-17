@@ -945,6 +945,12 @@ class AgentConfig:
     system_prompt: str = ""  # inline system prompt (takes precedence if set)
     system_prompt_path: str = ""  # path to system prompt file (.txt, .md)
     context_from_memory: bool = True  # inject relevant memory context into prompts
+    # Also inject knowledge.db hits (Gmail, Obsidian, Drive, …) into chat
+    # context alongside memory.db. Off by default so existing installs keep
+    # the leaner memory-only RAG until explicitly enabled.
+    context_from_knowledge: bool = False
+    context_knowledge_top_k: int = 3
+    context_knowledge_max_tokens: int = 1024
     research_model: str = ""  # Ollama model for Deep Research (tool-calling planner)
     tool_model: str = ""  # Local model for tool loop when UI selects Cursor/fast proxy
     response_model: str = ""  # Optional fast model to polish answers after tools
@@ -1450,6 +1456,16 @@ class AgentManagerConfig:
 
 
 @dataclass(slots=True)
+class ConnectorsConfig:
+    """Background sync settings for data-source connectors."""
+
+    # Periodically re-sync every connected connector (incl. the Obsidian
+    # vault) into knowledge.db so indexed data stays fresh without restarts.
+    sync_enabled: bool = True
+    sync_interval: int = 1800  # seconds between background sync cycles
+
+
+@dataclass(slots=True)
 class MemoryFilesConfig:
     """Persistent memory-file paths and nudge settings."""
 
@@ -1589,6 +1605,7 @@ class JarvisConfig:
     speech: SpeechConfig = field(default_factory=SpeechConfig)
     optimize: OptimizeConfig = field(default_factory=OptimizeConfig)
     agent_manager: AgentManagerConfig = field(default_factory=AgentManagerConfig)
+    connectors: ConnectorsConfig = field(default_factory=ConnectorsConfig)
     memory_files: MemoryFilesConfig = field(default_factory=MemoryFilesConfig)
     system_prompt: SystemPromptConfig = field(default_factory=SystemPromptConfig)
     compression: CompressionConfig = field(default_factory=CompressionConfig)
@@ -1851,6 +1868,7 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
             "speech",
             "optimize",
             "agent_manager",
+            "connectors",
             "digest",
             "proactive",
             "memory_files",

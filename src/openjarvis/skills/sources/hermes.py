@@ -37,8 +37,22 @@ class HermesResolver(SourceResolver):
     def sync(self) -> None:
         """Clone or pull the Hermes repo into the cache directory."""
         if self._cache_root.exists() and (self._cache_root / ".git").exists():
+            # Pin to origin/main — bare ``git pull`` can fail with
+            # "Cannot fast-forward to multiple branches" when the cache
+            # repo has extra upstream tracking config (e.g. vscode-merge-base).
             subprocess.run(
-                ["git", "-C", str(self._cache_root), "pull", "--ff-only"],
+                ["git", "-C", str(self._cache_root), "fetch", "origin", "main"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(self._cache_root),
+                    "merge",
+                    "--ff-only",
+                    "origin/main",
+                ],
                 check=True,
             )
         else:

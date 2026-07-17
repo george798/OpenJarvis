@@ -84,7 +84,7 @@ class ScheduleTaskTool(BaseTool):
         if schedule_type == "natural" or (
             not schedule_type and schedule_value and "every" in schedule_value.lower()
         ):
-            from openjarvis.hermes.schedule_nl import parse_natural_schedule
+            from openjarvis.scheduler.schedule_nl import parse_natural_schedule
 
             parsed = parse_natural_schedule(schedule_value or schedule_type)
             if parsed is None:

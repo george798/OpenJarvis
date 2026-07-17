@@ -105,6 +105,9 @@ class ObsidianConnector(BaseConnector):
     connector_id = "obsidian"
     display_name = "Obsidian / Markdown"
     auth_type = "filesystem"
+    # Vault files are edited in place — re-syncs must replace stale chunks
+    # instead of deduping on doc_id (see IngestionPipeline.ingest(replace=)).
+    mutable_documents = True
 
     def __init__(self, vault_path: str = "") -> None:
         self._vault_path = vault_path

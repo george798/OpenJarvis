@@ -105,7 +105,13 @@ class _LightweightSystem:
     """Minimal system facade for the executor — avoids rebuilding the
     full JarvisSystem (which picks a random model from Ollama)."""
 
-    def __init__(self, engine: Any, model: str, config: Any = None):
+    def __init__(
+        self,
+        engine: Any,
+        model: str,
+        config: Any = None,
+        app_state: Any = None,
+    ):
         self.engine = engine
         self.model = model
         self.config = config
@@ -115,12 +121,59 @@ class _LightweightSystem:
         # facade previously left it None, so they reported "No memory backend
         # configured" even though the backend was configured and active.
         self.memory_backend = _resolve_memory_backend(config)
+        # Tool pool shared with the executor's MCP fallback. Previously always
+        # absent on this facade, so Run Now / immediate ticks could never
+        # resolve MCP-discovered tools (host_exec etc.) even though scheduled
+        # ticks and streaming chat could.
+        self.tool_executor: Any = None
+        self.session_store: Any = None
+        self.channel_backend: Any = None
+        if app_state is not None:
+            self._wire_shared_tooling(app_state)
+
+    def _wire_shared_tooling(self, app_state: Any) -> None:
+        """Reuse the serve-time tool pool (incl. MCP adapters) for ticks.
+
+        Prefer the full JarvisSystem the AgentScheduler already holds; fall
+        back to a ToolExecutor built from the streaming path's cached MCP
+        adapters so all three execution paths see the same tools.
+        """
+        full = getattr(
+            getattr(getattr(app_state, "agent_scheduler", None), "_executor", None),
+            "_system",
+            None,
+        )
+        if full is not None:
+            self.tool_executor = getattr(full, "tool_executor", None)
+            self.session_store = getattr(full, "session_store", None)
+            self.channel_backend = getattr(full, "channel_backend", None)
+            if self.memory_backend is None:
+                self.memory_backend = getattr(full, "memory_backend", None)
+        if self.tool_executor is not None:
+            return
+
+        cached = getattr(app_state, "_tick_tool_executor", None)
+        if cached is not None:
+            self.tool_executor = cached
+            return
+        try:
+            _specs, adapters = _get_mcp_tools(app_state)
+            if adapters:
+                from openjarvis.tools._stubs import ToolExecutor
+
+                # Clients stay alive on app_state._mcp_clients (see
+                # _get_mcp_tools), so the adapters' transports persist.
+                self.tool_executor = ToolExecutor(list(adapters.values()))
+                app_state._tick_tool_executor = self.tool_executor
+        except Exception:
+            logger.debug("Tick MCP tool pool init failed", exc_info=True)
 
 
 def _make_lightweight_system(
     engine: Any,
     model: str,
     config: Any = None,
+    app_state: Any = None,
 ) -> _LightweightSystem:
     """Build a minimal system with a fresh inference engine.
 
@@ -165,10 +218,10 @@ def _make_lightweight_system(
             )
         except Exception:
             pass  # telemetry is optional
-        return _LightweightSystem(plain_engine, model, cfg)
+        return _LightweightSystem(plain_engine, model, cfg, app_state=app_state)
     except Exception:
         pass
-    return _LightweightSystem(engine, model, config)
+    return _LightweightSystem(engine, model, config, app_state=app_state)
 
 
 def _parse_param_count(model_name: str) -> float:
@@ -1667,6 +1720,7 @@ def create_agent_manager_router(
                     server_engine,
                     server_model,
                     server_config,
+                    app_state=request.app.state,
                 )
                 executor.set_system(system)
                 # The route handler above already called start_tick() to
@@ -2022,6 +2076,7 @@ def create_agent_manager_router(
                         _srv_engine,
                         _srv_model,
                         _srv_config,
+                        app_state=request.app.state,
                     )
                     executor.set_system(system)
                     logger.info(
