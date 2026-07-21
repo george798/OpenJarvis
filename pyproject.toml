@@ -124,6 +124,45 @@ dashboard = ["textual>=0.80"]
 speech = ["faster-whisper>=1.0"]
 speech-kokoro = ["kokoro>=0.9", "soundfile>=0.12"]
 speech-deepgram = ["deepgram-sdk>=3.0"]
+# Full runtime set for deploy/docker/Dockerfile.hybrid (API + MCP SSE + memory +
+# browser + speech + vault + PDF). Prefer `uv pip install ".[hybrid]"` over
+# ad-hoc pip lines so rebuilds cannot silently drop transitive deps (the
+# orjson / cryptography class of "tool works in code, dies in the image").
+# Packages are flattened (not self-referential) so `uv pip install .[hybrid]`
+# from a local path resolves cleanly.
+hybrid = [
+    # server
+    "fastapi>=0.110",
+    "uvicorn>=0.30",
+    "pydantic>=2.0",
+    "python-multipart>=0.0.9",
+    # inference
+    "openai>=1.30",
+    "anthropic>=0.30",
+    "litellm>=1.40",
+    # memory / dense
+    "faiss-cpu>=1.7",
+    "sentence-transformers>=2.2",
+    "numpy>=1.24",
+    # speech
+    "faster-whisper>=1.0",
+    "kokoro>=0.9",
+    "soundfile>=0.12",
+    # browser + search + scheduler
+    "playwright>=1.40",
+    "tavily-python>=0.3",
+    "ddgs>=9.11.4",
+    "croniter>=2.0",
+    # pdf + vault crypto (must be explicit — do not rely on transitive pulls)
+    "pdfplumber>=0.10",
+    "cryptography>=43",
+    # skill optimizer (config [learning.skills] optimizer = "dspy")
+    "dspy>=2.6",
+    # docker/MCP runtime pins (not covered by other named extras)
+    "mcp>=1.26",
+    "markitdown[all]",
+    "orjson>=3.10",
+]
 eval-wandb = ["wandb>=0.17"]
 eval-sheets = ["gspread>=6.0", "google-auth>=2.0"]
 mining-pearl-cpu = [

@@ -158,10 +158,19 @@ class BaseAgent(ABC):
             and any(m.role == Role.SYSTEM for m in context.conversation.messages)
         )
 
-        if self._prompt_builder is not None:
-            effective_system_prompt = self._prompt_builder.build()
-        elif system_prompt:
+        if system_prompt is not None:
+            # Explicit agent prompt wins. Append SOUL/MEMORY/USER persona when
+            # a builder is wired — never let builder.build() replace specialized
+            # instructions (consolidator / curator / self-update ticks).
             effective_system_prompt = system_prompt
+            if self._prompt_builder is not None:
+                persona = self._prompt_builder.persona_sections()
+                if persona:
+                    effective_system_prompt = (
+                        f"{system_prompt}\n\n{persona}" if system_prompt else persona
+                    )
+        elif self._prompt_builder is not None:
+            effective_system_prompt = self._prompt_builder.build()
         elif _context_has_system:
             effective_system_prompt = None
         else:

@@ -462,6 +462,16 @@ class AgentExecutor:
         def _accepts(name: str) -> bool:
             return accepts_var_kw or name in init_sig.parameters
 
+        # Per-agent sampler / turn budget from template config. Without these,
+        # orchestrator ticks silently use class defaults (max_turns=10) and
+        # burn the budget before finishing specialized workflows.
+        if config.get("max_turns") is not None and _accepts("max_turns"):
+            agent_kwargs["max_turns"] = int(config["max_turns"])
+        if config.get("temperature") is not None and _accepts("temperature"):
+            agent_kwargs["temperature"] = float(config["temperature"])
+        if config.get("max_tokens") is not None and _accepts("max_tokens"):
+            agent_kwargs["max_tokens"] = int(config["max_tokens"])
+
         state_kwargs: dict[str, Any] = {}
         if _accepts("operator_id"):
             state_kwargs["operator_id"] = agent["id"]
@@ -475,17 +485,22 @@ class AgentExecutor:
                     self._system, "memory_backend", None
                 )
             # Wire SOUL.md / MEMORY.md / USER.md persona files into persistent
-            # agents, mirroring the one-shot `jarvis ask` path so they no
-            # longer apply to CLI calls only (#376).
+            # agents. When the agent already has a specialized system_prompt
+            # (consolidator, curator, self-update), use an empty agent_template
+            # so _build_messages / _apply_persona only *append* persona —
+            # never replace instructions with the main-brain default (#376).
             cfg = getattr(self._system, "config", None)
             if cfg is not None and _accepts("prompt_builder"):
                 from openjarvis.prompt.builder import SystemPromptBuilder
 
-                state_kwargs["prompt_builder"] = SystemPromptBuilder(
-                    agent_template=getattr(
-                        cfg.agent, "default_system_prompt", ""
+                if sys_prompt:
+                    agent_template = ""
+                else:
+                    agent_template = (
+                        getattr(cfg.agent, "default_system_prompt", "") or ""
                     )
-                    or "",
+                state_kwargs["prompt_builder"] = SystemPromptBuilder(
+                    agent_template=agent_template,
                     memory_files_config=cfg.memory_files,
                     system_prompt_config=cfg.system_prompt,
                 )

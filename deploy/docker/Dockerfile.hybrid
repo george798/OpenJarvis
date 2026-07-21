@@ -23,12 +23,20 @@ COPY src/ src/
 COPY rust/ rust/
 COPY scripts/install scripts/install
 COPY deploy/windows deploy/windows
+COPY deploy/docker/scripts/verify_hybrid_deps.py deploy/docker/scripts/verify_hybrid_deps.py
 COPY --from=frontend /src/openjarvis/server/static src/openjarvis/server/static/
 
+# Single named extra owns the hybrid runtime. Ad-hoc pip lines here have
+# historically drifted (missing orjson / cryptography / pdfplumber) and
+# surfaced as mid-chat "No module named …" errors. Build FAILS if verify
+# reports a required import missing.
 RUN pip install --no-cache-dir uv && \
-    uv pip install --system ".[server,inference-cloud,inference-litellm,memory-faiss,speech,speech-kokoro,browser,tools-search,scheduler]" && \
-    uv pip install --system "mcp>=1.26" "maturin>=1.12" "markitdown[all]" "pdfplumber" && \
+    uv pip install --system ".[hybrid]" && \
+    # markitdown-mcp pins conflict with the MCP SDK when resolved together;
+    # install with --no-deps after mcp is already present.
     uv pip install --system "markitdown-mcp" --no-deps && \
+    python deploy/docker/scripts/verify_hybrid_deps.py && \
+    uv pip install --system "maturin>=1.12" && \
     maturin build --release -m rust/crates/openjarvis-python/Cargo.toml -o /tmp/wheels && \
     uv pip install --system /tmp/wheels/*.whl
 
@@ -52,6 +60,7 @@ RUN mkdir -p /opt/playwright && \
 COPY deploy/docker/scripts/ /app/deploy/docker/scripts/
 RUN sed -i 's/\r$//' /app/deploy/docker/scripts/entrypoint.sh && \
     sed -i 's/\r$//' /app/deploy/docker/scripts/inject_web_bootstrap.py && \
+    sed -i 's/\r$//' /app/deploy/docker/scripts/verify_hybrid_deps.py && \
     chmod +x /app/deploy/docker/scripts/entrypoint.sh
 
 EXPOSE 8000 8888

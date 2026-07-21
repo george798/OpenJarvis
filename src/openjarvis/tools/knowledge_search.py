@@ -7,6 +7,7 @@ Optionally delegates to a ``TwoStageRetriever`` for BM25 + reranking.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any, Optional
 
 from openjarvis.connectors.store import KnowledgeStore
@@ -140,6 +141,7 @@ class KnowledgeSearchTool(BaseTool):
                 until=until or "",
             )
         else:
+            assert store is not None
             results = store.retrieve(
                 query,
                 top_k=top_k,
@@ -149,6 +151,24 @@ class KnowledgeSearchTool(BaseTool):
                 since=since,
                 until=until,
             )
+            # Natural-language / date queries often AND to zero hits even after
+            # hyphen sanitisation. Fall back to OR-joined tokens (same pattern
+            # as project_context).
+            if not results:
+                terms = [
+                    t for t in re.findall(r"[A-Za-z0-9_]+", query) if len(t) > 1
+                ]
+                if len(terms) >= 2:
+                    or_query = " OR ".join(f'"{t}"' for t in terms)
+                    results = store.retrieve(
+                        or_query,
+                        top_k=top_k,
+                        source=source,
+                        doc_type=doc_type,
+                        author=author,
+                        since=since,
+                        until=until,
+                    )
 
         if not results:
             return ToolResult(

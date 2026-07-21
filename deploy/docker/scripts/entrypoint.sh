@@ -73,6 +73,15 @@ if ! ls "$PLAYWRIGHT_BROWSERS_PATH"/chromium-* >/dev/null 2>&1; then
   playwright install --with-deps chromium
 fi
 
+# Soft dependency probe — never blocks startup (build-time verify is hard-fail).
+# Surfaces image drift after volume mounts / partial upgrades as a clear log line
+# instead of a mid-chat "No module named …" surprise.
+if [ -f /app/deploy/docker/scripts/verify_hybrid_deps.py ]; then
+  echo "[openjarvis] Checking hybrid runtime deps..."
+  python /app/deploy/docker/scripts/verify_hybrid_deps.py --soft --check-browsers \
+    || echo "[openjarvis] WARNING: hybrid dep check reported issues (see above)."
+fi
+
 echo "[openjarvis] Starting MCP SSE bridge on :8888..."
 python /app/deploy/docker/scripts/mcp_sse_server.py &
 MCP_PID=$!

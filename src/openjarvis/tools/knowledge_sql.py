@@ -6,6 +6,7 @@ and filtering operations that BM25 search cannot handle.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from typing import Any, Optional
 
@@ -19,7 +20,14 @@ _MAX_ROWS = 50
 _SCHEMA_DESCRIPTION = (
     "Table: knowledge_chunks\n"
     "Columns: id, content, source, doc_type, doc_id, title, author, "
-    "participants, timestamp, thread_id, url, metadata, chunk_index"
+    "participants, timestamp, thread_id, url, metadata, chunk_index, "
+    "deleted_at, last_synced"
+)
+
+# Word-boundary check — substring matching would reject columns like deleted_at.
+_FORBIDDEN_RE = re.compile(
+    r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|ATTACH)\b",
+    re.IGNORECASE,
 )
 
 
@@ -94,17 +102,16 @@ class KnowledgeSQLTool(BaseTool):
                 success=False,
             )
 
-        _FORBIDDEN = ("DROP", "DELETE", "INSERT", "UPDATE", "ALTER", "CREATE", "ATTACH")
-        for forbidden in _FORBIDDEN:
-            if forbidden in normalized:
-                return ToolResult(
-                    tool_name="knowledge_sql",
-                    content=(
-                        f"Query contains forbidden keyword: {forbidden}."
-                        " Only SELECT queries allowed."
-                    ),
-                    success=False,
-                )
+        bad = _FORBIDDEN_RE.search(query)
+        if bad:
+            return ToolResult(
+                tool_name="knowledge_sql",
+                content=(
+                    f"Query contains forbidden keyword: {bad.group(1).upper()}."
+                    " Only SELECT queries allowed."
+                ),
+                success=False,
+            )
 
         try:
             rows = store._conn.execute(query).fetchmany(_MAX_ROWS)

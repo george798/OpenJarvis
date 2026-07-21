@@ -474,8 +474,12 @@ class OrchestratorAgent(ToolUsingAgent):
     ) -> AgentResult:
         self._emit_turn_start(input)
 
-        # Build initial messages
-        messages = self._build_messages(input, context)
+        # Build initial messages — pass the agent's specialized system_prompt
+        # so managed ticks (consolidator, curator, …) are not replaced by the
+        # main-brain default / prompt_builder template.
+        messages = self._build_messages(
+            input, context, system_prompt=self._system_prompt
+        )
 
         # Get OpenAI-format tool definitions
         openai_tools = self._executor.get_openai_tools() if self._tools else []
@@ -484,16 +488,36 @@ class OrchestratorAgent(ToolUsingAgent):
         turns = 0
         total_prompt_tokens = 0
         total_completion_tokens = 0
+        empty_search_nudge_sent = False
+        final_answer_nudge_sent = False
 
         for _turn in range(self._max_turns):
             turns += 1
+            is_last_turn = turns >= self._max_turns
 
             if self._loop_guard:
                 messages = self._loop_guard.compress_context(messages)
 
-            # Build generate kwargs
+            # Last turn: withhold tools so local models cannot burn the budget
+            # on endless knowledge_search / host_exec loops without answering.
+            if (
+                is_last_turn
+                and all_tool_results
+                and not final_answer_nudge_sent
+            ):
+                messages.append(
+                    Message(
+                        role=Role.USER,
+                        content=(
+                            "Turn budget is exhausted. Do NOT call any more tools. "
+                            "Write your final status summary now in plain text."
+                        ),
+                    )
+                )
+                final_answer_nudge_sent = True
+
             gen_kwargs: dict[str, Any] = {}
-            if openai_tools:
+            if openai_tools and not is_last_turn:
                 gen_kwargs["tools"] = openai_tools
 
             result = self._generate(messages, **gen_kwargs)
@@ -506,35 +530,43 @@ class OrchestratorAgent(ToolUsingAgent):
             content = result.get("content", "")
             raw_tool_calls = result.get("tool_calls", [])
 
-            # Recover tool calls that the model emitted as a JSON blob in the
-            # content instead of as structured tool_calls (common with small
-            # local models). Without this the agent would "describe" browsing
-            # or searching without ever executing the tool.
-            if not raw_tool_calls and content:
-                recovered = self._recover_text_tool_calls(content)
-                if recovered:
-                    raw_tool_calls = recovered
-            elif raw_tool_calls:
-                raw_tool_calls = self._normalize_raw_tool_calls(raw_tool_calls)
+            # On the last turn, discard tool calls — answer only.
+            if is_last_turn:
+                raw_tool_calls = []
+            else:
+                # Recover tool calls that the model emitted as a JSON blob in the
+                # content instead of as structured tool_calls (common with small
+                # local models). Without this the agent would "describe" browsing
+                # or searching without ever executing the tool.
+                if not raw_tool_calls and content:
+                    recovered = self._recover_text_tool_calls(content)
+                    if recovered:
+                        raw_tool_calls = recovered
+                elif raw_tool_calls:
+                    raw_tool_calls = self._normalize_raw_tool_calls(raw_tool_calls)
 
-            # No tool calls -> infer from user intent, then final answer
-            if not raw_tool_calls:
-                known = {t.spec.name for t in self._tools} if self._tools else set()
-                inferred: list[dict] = []
-                # Only infer from the user message on the first turn — re-running
-                # inference every turn prevents the model from giving a final answer
-                # after tool results (burns max_turns on Composio / Reddit flows).
-                if turns == 1:
-                    inferred = self._infer_tool_from_input(input, known)
-                if inferred:
-                    raw_tool_calls = inferred
+                # No tool calls -> infer from user intent, then final answer
+                if not raw_tool_calls:
+                    known = {t.spec.name for t in self._tools} if self._tools else set()
+                    inferred: list[dict] = []
+                    # Only infer from the user message on the first turn — re-running
+                    # inference every turn prevents the model from giving a final answer
+                    # after tool results (burns max_turns on Composio / Reddit flows).
+                    if turns == 1:
+                        inferred = self._infer_tool_from_input(input, known)
+                    if inferred:
+                        raw_tool_calls = inferred
 
             if not raw_tool_calls:
                 content = self._check_continuation(result, messages)
                 content = self._strip_think_tags(content)
                 # Qwen sometimes returns empty after a tool result (especially
                 # large COMPOSIO_SEARCH_TOOLS payloads). Nudge once per stall.
-                if not content.strip() and all_tool_results and turns < self._max_turns:
+                if (
+                    not content.strip()
+                    and all_tool_results
+                    and not is_last_turn
+                ):
                     messages.append(
                         Message(
                             role=Role.USER,
@@ -544,6 +576,8 @@ class OrchestratorAgent(ToolUsingAgent):
                     continue
                 if not content.strip() and all_tool_results:
                     content = self._synthesize_from_tool_results(all_tool_results)
+                elif not content.strip():
+                    content = "Reached the turn budget without a final answer."
                 self._emit_turn_end(turns=turns, content_length=len(content))
                 return AgentResult(
                     content=content,
@@ -553,6 +587,7 @@ class OrchestratorAgent(ToolUsingAgent):
                         "prompt_tokens": total_prompt_tokens,
                         "completion_tokens": total_completion_tokens,
                         "total_tokens": total_prompt_tokens + total_completion_tokens,
+                        "forced_final_answer": is_last_turn and bool(all_tool_results),
                     },
                 )
 
@@ -651,6 +686,52 @@ class OrchestratorAgent(ToolUsingAgent):
                             name=tc.name,
                         )
                     )
+
+            # If every tool this turn was blocked as a repeat, stop digging
+            # and force a final answer — otherwise max_turns burns on loops.
+            turn_results = all_tool_results[-len(tool_calls) :]
+            if turn_results and all(
+                (tr.content or "").startswith("Loop guard:") for tr in turn_results
+            ):
+                messages.append(
+                    Message(
+                        role=Role.USER,
+                        content=(
+                            "Your last tool call(s) were blocked as identical repeats. "
+                            "Do NOT call the same tool with the same arguments again. "
+                            "Give your final status summary now."
+                        ),
+                    )
+                )
+            elif not empty_search_nudge_sent:
+                # Different queries still burn the budget (Qwen + empty BM25).
+                # After two empty searches in a row, demand a status write-up.
+                streak = 0
+                for tr in reversed(all_tool_results):
+                    body = (tr.content or "").strip().lower()
+                    if tr.tool_name in (
+                        "knowledge_search",
+                        "memory_search",
+                    ) and (
+                        body.startswith("no relevant results")
+                        or body.startswith("loop guard:")
+                    ):
+                        streak += 1
+                    else:
+                        break
+                if streak >= 2:
+                    messages.append(
+                        Message(
+                            role=Role.USER,
+                            content=(
+                                "Recent searches returned no useful new results. "
+                                "Stop searching. Write your final 5-line status now "
+                                "(facts added / rules promoted / skipped reasons)."
+                            ),
+                        )
+                    )
+                    empty_search_nudge_sent = True
+
 
         # Max turns exceeded — return partial results if the model never answered
         final_content = self._strip_think_tags(content) if content else ""

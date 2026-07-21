@@ -32,7 +32,8 @@ from openjarvis.tools._stubs import ToolSpec
 # ---------------------------------------------------------------------------
 
 _GCAL_API_BASE = "https://www.googleapis.com/calendar/v3"
-_GCAL_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+# Full calendar scope — sync is read-heavy, but accept/decline/delete need write.
+_GCAL_SCOPE = "https://www.googleapis.com/auth/calendar"
 _DEFAULT_CREDENTIALS_PATH = str(DEFAULT_CONFIG_DIR / "connectors" / "gcalendar.json")
 
 # ---------------------------------------------------------------------------
@@ -82,6 +83,18 @@ def _gcal_api_event_patch(
     return resp.json()
 
 
+def _gcal_api_event_delete(
+    token: str, calendar_id: str, event_id: str
+) -> None:
+    """Delete a calendar event (HTTP 204 on success)."""
+    resp = httpx.delete(
+        f"{_GCAL_API_BASE}/calendars/{calendar_id}/events/{event_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+
+
 def _gcal_api_calendars_list(token: str) -> Dict[str, Any]:
     """Call the Calendar ``calendarList.list`` endpoint.
 
@@ -110,6 +123,9 @@ def _gcal_api_events_list(
     *,
     page_token: Optional[str] = None,
     time_min: Optional[str] = None,
+    time_max: Optional[str] = None,
+    max_results: int = 250,
+    query: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Call the Calendar ``events.list`` endpoint for a single calendar.
 
@@ -124,6 +140,12 @@ def _gcal_api_events_list(
     time_min:
         Lower bound (exclusive) for an event's end time (RFC3339 timestamp).
         When omitted the API returns all events.
+    time_max:
+        Upper bound (exclusive) for an event's start time (RFC3339).
+    max_results:
+        Page size (1–250).
+    query:
+        Free-text ``q`` filter (title/description/location/attendees).
 
     Returns
     -------
@@ -134,12 +156,16 @@ def _gcal_api_events_list(
     params: Dict[str, Any] = {
         "singleEvents": "true",
         "orderBy": "startTime",
-        "maxResults": 250,
+        "maxResults": max(1, min(int(max_results), 250)),
     }
     if page_token:
         params["pageToken"] = page_token
     if time_min:
         params["timeMin"] = time_min
+    if time_max:
+        params["timeMax"] = time_max
+    if query:
+        params["q"] = query
 
     resp = httpx.get(
         f"{_GCAL_API_BASE}/calendars/{calendar_id}/events",
@@ -463,6 +489,11 @@ class GCalendarConnector(BaseConnector):
             updated.append({"email": user_email, "responseStatus": "declined"})
         _gcal_api_event_patch(token, calendar_id, event_id, {"attendees": updated})
 
+    def delete_event(self, event_id: str, calendar_id: str = "primary") -> None:
+        """Permanently delete a calendar event the user owns or can modify."""
+        token = self._get_token()
+        _gcal_api_event_delete(token, calendar_id, event_id)
+
     def sync_status(self) -> SyncStatus:
         """Return sync progress from the most recent :meth:`sync` call."""
         return SyncStatus(
@@ -549,6 +580,34 @@ class GCalendarConnector(BaseConnector):
                         },
                     },
                     "required": [],
+                },
+                category="productivity",
+            ),
+            ToolSpec(
+                name="calendar_delete_event",
+                description=(
+                    "Delete a Google Calendar event by event_id. "
+                    "Prefer calendar_manage action=delete from chat tools."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "event_id": {
+                            "type": "string",
+                            "description": (
+                                "Event id (the part after 'gcalendar:' in "
+                                "knowledge_search / digest results)."
+                            ),
+                        },
+                        "calendar_id": {
+                            "type": "string",
+                            "description": (
+                                "Calendar ID. Defaults to 'primary'."
+                            ),
+                            "default": "primary",
+                        },
+                    },
+                    "required": ["event_id"],
                 },
                 category="productivity",
             ),

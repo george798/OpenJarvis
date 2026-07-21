@@ -441,6 +441,38 @@ def test_embedding_blob_round_trip(ks: KnowledgeStore) -> None:
     assert bytes(row[0]) == payload
 
 
+def test_retrieve_date_hyphen_query_finds_journal(ks: KnowledgeStore) -> None:
+    """Date-like queries (FTS5 treats '-' as NOT) still find journal notes."""
+    _store(
+        ks,
+        content="# Jarvis Journal — 2026-07-16\n\nEnabled Projects (2)",
+        source="obsidian",
+        doc_type="note",
+        doc_id="obsidian:Journal/2026-07-16.md",
+        title="2026-07-16",
+    )
+    _store(
+        ks,
+        content="# Jarvis Vault\nHome note",
+        source="obsidian",
+        doc_type="note",
+        doc_id="obsidian:Home.md",
+        title="Home",
+    )
+
+    results = ks.retrieve("2026-07-16", top_k=5, source="obsidian")
+    assert results, "hyphenated date query should not return empty"
+    assert any("2026-07-16" in (r.metadata.get("doc_id") or r.content) or
+               "Journal" in r.content or "2026" in r.content for r in results)
+
+
+def test_normalize_fts_query_quotes_tokens() -> None:
+    from openjarvis.connectors.store import _normalize_fts_query
+
+    assert _normalize_fts_query("2026-07-16") == '"2026" OR "07" OR "16"'
+    assert _normalize_fts_query('already "quoted" OR x') == 'already "quoted" OR x'
+
+
 def test_context_manager_closes_connection(tmp_path: Path) -> None:
     """Used as a context manager, KnowledgeStore closes its connection on exit."""
     import sqlite3

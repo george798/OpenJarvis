@@ -10,6 +10,7 @@ Pure Python ``sqlite3`` (no Rust extension required).
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -138,6 +139,32 @@ def _to_epoch(ts: Union[datetime, str, float, int]) -> float:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     return ts.timestamp()
+
+
+def _normalize_fts_query(query: str) -> str:
+    """Make natural-language / date queries safe for FTS5 MATCH.
+
+    FTS5 treats ``-`` as NOT, ``:`` as a column filter, and multi-word input
+    as implicit AND. Agent queries like ``Journal/2026-07-16`` or
+    ``yesterday's journal`` therefore often match nothing. Quote alphanumeric
+    tokens and OR-join them so BM25 can still rank richer overlaps higher.
+    Advanced queries that already use FTS operators are left untouched.
+    """
+    q = query.strip()
+    if not q:
+        return q
+    if re.search(r'\b(OR|AND|NEAR|NOT)\b|"', q, flags=re.IGNORECASE):
+        return q
+    terms = [
+        t
+        for t in re.findall(r"[A-Za-z0-9_]+", q)
+        if len(t) >= 2 or t.isdigit()
+    ]
+    if not terms:
+        return q
+    if len(terms) == 1:
+        return f'"{terms[0]}"'
+    return " OR ".join(f'"{t}"' for t in terms)
 
 
 # ---------------------------------------------------------------------------
@@ -407,11 +434,25 @@ class KnowledgeStore(MemoryBackend):
             LIMIT ?
         """
 
-        try:
-            rows = self._conn.execute(sql, [query] + params + [top_k]).fetchall()
-        except sqlite3.OperationalError:
-            # Malformed FTS query — return empty rather than crash
-            return []
+        # Prefer the raw query for precision; fall back to a sanitized OR form
+        # when FTS5 rejects special chars (e.g. dates with ``-``) or returns
+        # nothing for natural-language AND queries.
+        candidates = [query]
+        normalized = _normalize_fts_query(query)
+        if normalized != query:
+            candidates.append(normalized)
+
+        rows: list[sqlite3.Row] = []
+        for match_query in candidates:
+            try:
+                rows = self._conn.execute(
+                    sql, [match_query] + params + [top_k]
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+                continue
+            if rows:
+                break
 
         results: List[RetrievalResult] = []
         for row in rows:

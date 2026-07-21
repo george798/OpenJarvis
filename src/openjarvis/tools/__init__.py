@@ -182,6 +182,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.calendar_manage  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.mcp_manage  # noqa: F401
 except ImportError:
     pass

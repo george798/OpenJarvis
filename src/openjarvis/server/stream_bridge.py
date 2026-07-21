@@ -309,6 +309,16 @@ class AgentStreamBridge:
                     )
                 elif "400" in error_str:
                     error_content = f"The model returned an error: {error_str}"
+                elif isinstance(exc, ModuleNotFoundError) or (
+                    "no module named" in error_str.lower()
+                ):
+                    error_content = (
+                        f"Sorry, an error occurred: {error_str}. "
+                        "The hybrid Docker image is missing a Python package "
+                        "needed by a tool. Run .\\scripts\\verify-hybrid-deps.ps1 "
+                        "then rebuild: docker compose -f compose/docker-compose.yml "
+                        "build jarvis (installs .[hybrid])."
+                    )
                 else:
                     error_content = f"Sorry, an error occurred: {error_str}"
                 error_chunk = ChatCompletionChunk(

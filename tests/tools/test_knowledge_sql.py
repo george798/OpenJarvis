@@ -64,6 +64,20 @@ def test_rejects_drop(store: KnowledgeStore) -> None:
     assert not result.success
 
 
+def test_allows_deleted_at_column(store: KnowledgeStore) -> None:
+    """Column name deleted_at must not trip the DELETE keyword guard."""
+    from openjarvis.tools.knowledge_sql import KnowledgeSQLTool
+
+    tool = KnowledgeSQLTool(store=store)
+    result = tool.execute(
+        query=(
+            "SELECT doc_id FROM knowledge_chunks "
+            "WHERE deleted_at IS NULL LIMIT 5"
+        )
+    )
+    assert result.success, result.content
+
+
 def test_handles_bad_sql(store: KnowledgeStore) -> None:
     from openjarvis.tools.knowledge_sql import KnowledgeSQLTool
 

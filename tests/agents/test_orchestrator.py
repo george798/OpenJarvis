@@ -195,6 +195,24 @@ class TestOrchestratorAgent:
         assert len(messages) == 2
         assert messages[0].role == Role.SYSTEM
 
+    def test_function_calling_uses_agent_system_prompt(self):
+        """Function-calling mode must send the agent's specialized system_prompt.
+
+        Tick path sets system_prompt on OrchestratorAgent; previously
+        _run_function_calling called _build_messages without it, so managed
+        agents ran under the main-brain default (or prompt_builder template).
+        """
+        engine = _make_engine_no_tools("Status: done.")
+        agent = OrchestratorAgent(
+            engine,
+            "test-model",
+            system_prompt="You are the Memory Consolidator.",
+        )
+        agent.run("Consolidate.")
+        messages = engine.generate.call_args[0][0]
+        assert messages[0].role == Role.SYSTEM
+        assert "Memory Consolidator" in messages[0].content
+
     def test_tools_passed_to_engine(self):
         engine = _make_engine_no_tools()
         agent = OrchestratorAgent(
@@ -215,18 +233,42 @@ class TestOrchestratorAgent:
         assert "tools" not in call_kwargs
 
     def test_max_turns_exceeded(self):
-        """When the engine keeps returning tool calls, stop after max_turns."""
+        """When the engine keeps returning tool calls, last turn forces text."""
         engine = MagicMock()
         engine.engine_id = "mock"
-        engine.generate.return_value = {
-            "content": "",
-            "tool_calls": [
-                {"id": "c1", "name": "calculator", "arguments": '{"expression":"1+1"}'}
-            ],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-            "model": "test-model",
-            "finish_reason": "tool_calls",
-        }
+
+        def _gen(messages, **kwargs):
+            # Last turn omits tools — return a forced final answer
+            if "tools" not in kwargs:
+                return {
+                    "content": "Forced status: done searching.",
+                    "usage": {
+                        "prompt_tokens": 5,
+                        "completion_tokens": 3,
+                        "total_tokens": 8,
+                    },
+                    "model": "test-model",
+                    "finish_reason": "stop",
+                }
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "name": "calculator",
+                        "arguments": '{"expression":"1+1"}',
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 3,
+                    "total_tokens": 8,
+                },
+                "model": "test-model",
+                "finish_reason": "tool_calls",
+            }
+
+        engine.generate.side_effect = _gen
         agent = OrchestratorAgent(
             engine,
             "test-model",
@@ -235,7 +277,63 @@ class TestOrchestratorAgent:
         )
         result = agent.run("Loop forever")
         assert result.turns == 3
-        assert result.metadata.get("max_turns_exceeded") is True
+        assert result.metadata.get("max_turns_exceeded") is not True
+        assert "Forced status" in result.content
+        # Last generate call must not offer tools
+        assert "tools" not in engine.generate.call_args_list[-1].kwargs
+
+    def test_last_turn_omits_tools_even_if_model_emits_tool_calls(self):
+        """Last turn discards tool_calls and synthesizes if content is empty."""
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        engine.generate.side_effect = [
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "name": "calculator",
+                        "arguments": '{"expression":"2+2"}',
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 3,
+                    "total_tokens": 8,
+                },
+                "model": "test-model",
+                "finish_reason": "tool_calls",
+            },
+            {
+                # Last turn: even if model tries another tool call, ignore it
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c2",
+                        "name": "calculator",
+                        "arguments": '{"expression":"3+3"}',
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 3,
+                    "total_tokens": 8,
+                },
+                "model": "test-model",
+                "finish_reason": "tool_calls",
+            },
+        ]
+        agent = OrchestratorAgent(
+            engine,
+            "test-model",
+            tools=[_CalculatorStub()],
+            max_turns=2,
+        )
+        result = agent.run("Calc")
+        assert result.turns == 2
+        assert result.metadata.get("max_turns_exceeded") is not True
+        assert "tool(s)" in result.content or "4" in result.content
+        assert len(result.tool_results) == 1  # second tool call discarded
 
     def test_unknown_tool_in_response(self):
         engine = _make_engine_with_tool_call(
@@ -419,17 +517,14 @@ class TestOrchestratorAgent:
         assert result.tool_results[0].latency_seconds >= 0
 
     def test_max_turns_1(self):
-        """With max_turns=1 and a tool call, should stop after 1 turn."""
+        """With max_turns=1, tools are withheld so the model must answer in text."""
         engine = MagicMock()
         engine.engine_id = "mock"
         engine.generate.return_value = {
-            "content": "",
-            "tool_calls": [
-                {"id": "c1", "name": "calculator", "arguments": '{"expression":"1"}'}
-            ],
+            "content": "No tools needed — done.",
             "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
             "model": "test-model",
-            "finish_reason": "tool_calls",
+            "finish_reason": "stop",
         }
         agent = OrchestratorAgent(
             engine,
@@ -439,7 +534,9 @@ class TestOrchestratorAgent:
         )
         result = agent.run("Calc")
         assert result.turns == 1
-        assert result.metadata.get("max_turns_exceeded") is True
+        assert result.metadata.get("max_turns_exceeded") is not True
+        assert result.content == "No tools needed — done."
+        assert "tools" not in engine.generate.call_args.kwargs
 
     def test_agent_turn_end_data_no_tools(self):
         bus = EventBus(record_history=True)
@@ -453,15 +550,35 @@ class TestOrchestratorAgent:
     def test_result_content_on_max_turns(self):
         engine = MagicMock()
         engine.engine_id = "mock"
-        engine.generate.return_value = {
-            "content": "partial",
-            "tool_calls": [
-                {"id": "c1", "name": "calculator", "arguments": '{"expression":"1"}'}
-            ],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-            "model": "test-model",
-            "finish_reason": "tool_calls",
-        }
+        engine.generate.side_effect = [
+            {
+                "content": "partial",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "name": "calculator",
+                        "arguments": '{"expression":"1"}',
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 3,
+                    "total_tokens": 8,
+                },
+                "model": "test-model",
+                "finish_reason": "tool_calls",
+            },
+            {
+                "content": "final from last turn",
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 3,
+                    "total_tokens": 8,
+                },
+                "model": "test-model",
+                "finish_reason": "stop",
+            },
+        ]
         agent = OrchestratorAgent(
             engine,
             "test-model",
@@ -469,8 +586,7 @@ class TestOrchestratorAgent:
             max_turns=2,
         )
         result = agent.run("Calc")
-        # Should use the partial content if available
-        assert result.content == "partial"
+        assert result.content == "final from last turn"
 
 
 class TestOrchestratorStructuredMode:

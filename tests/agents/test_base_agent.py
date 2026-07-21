@@ -205,6 +205,41 @@ class TestBuildMessages:
         assert messages[1].content == "prev"
         assert messages[2].content == "new"
 
+    def test_explicit_system_prompt_wins_over_prompt_builder(self, tmp_path):
+        """Specialized agent prompts must not be replaced by main-brain template.
+
+        Managed-agent ticks wire a SystemPromptBuilder for SOUL/MEMORY/USER.
+        When the agent also has its own system_prompt (consolidator, curator,
+        self-update), that specialized prompt must win — persona is appended,
+        never replaced. Otherwise orchestrator ticks inherit the main brain
+        and burn turns on host_* / wrong tools.
+        """
+        from openjarvis.core.config import MemoryFilesConfig, SystemPromptConfig
+        from openjarvis.prompt.builder import SystemPromptBuilder
+
+        soul = tmp_path / "SOUL.md"
+        soul.write_text("You are Kira the main brain.", encoding="utf-8")
+        builder = SystemPromptBuilder(
+            agent_template="MAIN_BRAIN_DEFAULT_TEMPLATE",
+            memory_files_config=MemoryFilesConfig(
+                soul_path=str(soul),
+                memory_path=str(tmp_path / "MEMORY.md"),
+                user_path=str(tmp_path / "USER.md"),
+            ),
+            system_prompt_config=SystemPromptConfig(),
+        )
+        engine = MagicMock()
+        agent = _ConcreteAgent(engine, "m", prompt_builder=builder)
+        messages = agent._build_messages(
+            "tick",
+            system_prompt="You are the Memory Consolidator.",
+        )
+        assert messages[0].role == Role.SYSTEM
+        content = messages[0].content
+        assert content.startswith("You are the Memory Consolidator.")
+        assert "You are Kira the main brain." in content
+        assert "MAIN_BRAIN_DEFAULT_TEMPLATE" not in content
+
 
 class TestGenerate:
     def test_delegates_to_engine(self):

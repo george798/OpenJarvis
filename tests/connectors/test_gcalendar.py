@@ -157,13 +157,25 @@ def test_disconnect(connector, tmp_path: Path) -> None:
 
 
 def test_mcp_tools(connector) -> None:
-    """mcp_tools() returns exactly 3 tools with the required names."""
+    """mcp_tools() returns the expected calendar tool specs."""
     tools = connector.mcp_tools()
     names = {t.name for t in tools}
-    assert len(tools) == 3
     assert "calendar_get_events_today" in names
     assert "calendar_search_events" in names
     assert "calendar_next_meeting" in names
+    assert "calendar_delete_event" in names
+
+
+def test_delete_event(connector, tmp_path: Path) -> None:
+    """delete_event() calls the Calendar DELETE endpoint."""
+    creds_path = Path(connector._credentials_path)
+    creds_path.write_text(json.dumps({"token": "fake-access-token"}), encoding="utf-8")
+
+    with patch(
+        "openjarvis.connectors.gcalendar._gcal_api_event_delete"
+    ) as mock_delete:
+        connector.delete_event("evt1", calendar_id="primary")
+        mock_delete.assert_called_once_with("fake-access-token", "primary", "evt1")
 
 
 # ---------------------------------------------------------------------------

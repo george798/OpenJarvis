@@ -258,9 +258,22 @@ class ToolExecutor:
                 success=False,
             )
         except Exception as exc:
+            msg = f"Tool execution error: {exc}"
+            # Missing image deps used to surface as opaque mid-chat failures
+            # (e.g. No module named 'orjson'). Point at the hybrid verify path.
+            if isinstance(exc, ModuleNotFoundError) or (
+                isinstance(exc, ImportError)
+                and "no module named" in str(exc).lower()
+            ):
+                msg += (
+                    " — hybrid image is missing a runtime package. "
+                    "On the host run: .\\scripts\\verify-hybrid-deps.ps1 "
+                    "then rebuild with docker compose build jarvis "
+                    "(Dockerfile installs .[hybrid])."
+                )
             result = ToolResult(
                 tool_name=tool_call.name,
-                content=f"Tool execution error: {exc}",
+                content=msg,
                 success=False,
             )
         latency = time.time() - t0
